@@ -144,6 +144,20 @@ async function main(): Promise<void> {
   let skippedCount = 0;
 
   try {
+    // Look up the active season
+    const { data: season, error: seasonError } = await supabase
+      .from('seasons')
+      .select('id')
+      .eq('is_active', true)
+      .single();
+
+    if (seasonError || !season) {
+      const msg = 'No active season found — create a season first';
+      console.error('syncUpcomingEvents:', msg);
+      await logRun({ job: 'sync_events', status: 'error', message: msg, duration_ms: Date.now() - startMs });
+      process.exit(1);
+    }
+
     const scraped = await scrapeEvents();
     console.log(`syncUpcomingEvents: scraped ${scraped.length} NT/ES event(s)`);
 
@@ -161,6 +175,7 @@ async function main(): Promise<void> {
       }
 
       const row = {
+        season_id: season.id,
         pdga_event_id: event.pdgaEventId,
         name: event.name,
         location: event.location,
