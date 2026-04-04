@@ -1,0 +1,30 @@
+name: Sync Upcoming Events
+
+on:
+  schedule:
+    # Daily at 20:00 UTC = 06:00 AEDT
+    - cron: '0 20 * * *'
+  workflow_dispatch:
+
+jobs:
+  sync-upcoming-events:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run syncUpcomingEvents
+        run: npx tsx scripts/syncUpcomingEvents.ts
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          PDGA_USERNAME: ${{ secrets.PDGA_USERNAME }}
+          PDGA_PASSWORD: ${{ secrets.PDGA_PASSWORD }}
