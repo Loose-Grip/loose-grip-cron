@@ -85,7 +85,7 @@ async function scrapeEvents(): Promise<ScrapedEvent[]> {
   // Capitalised Tier[] and Classification[] are required by the PDGA search form
   const url =
     'https://www.pdga.com/tour/search' +
-    '?Tier%5B%5D=NT&Tier%5B%5D=ES' +
+    '?Tier%5B%5D=NT&Tier%5B%5D=ES&Tier%5B%5D=M' +
     '&status=sanctioned' +
     '&Classification%5B%5D=Pro';
 
@@ -108,8 +108,8 @@ async function scrapeEvents(): Promise<ScrapedEvent[]> {
     if (!tierMatch) return;
     const tier = tierMatch[1];
 
-    // Only NT and ES
-    if (!['NT', 'ES'].includes(tier)) return;
+    // Only NT, ES, and M (Majors)
+    if (!['NT', 'ES', 'M'].includes(tier)) return;
 
     const name = $row.find('td.views-field-OfficialName a').text().trim();
     if (!name) return;
