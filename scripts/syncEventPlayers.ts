@@ -3,11 +3,9 @@
  *
  * For each event with status 'upcoming' or 'draft_open':
  *   1. Scrape the MPO player list from the PDGA event page
- *   2. Enrich with rating + nationality from the PDGA API
- *   3. Upsert into event_players
+ *   2. Upsert into event_players (rating + nationality come directly from the page)
  */
 
-import { withSession } from '../lib/pdga/auth';
 import { scrapeEventPlayers } from '../lib/scraper/pdgaEventPlayers';
 import { supabase } from '../lib/supabase';
 import { logRun } from '../lib/logger';
@@ -21,7 +19,6 @@ interface EventRow {
 async function main(): Promise<void> {
   const startMs = Date.now();
 
-  // Fetch events that need player lists
   const { data: events, error: eventsError } = await supabase
     .from('events')
     .select('id, pdga_event_id, name')
@@ -45,55 +42,46 @@ async function main(): Promise<void> {
   const errors: string[] = [];
   let totalPlayers = 0;
 
-  try {
-    await withSession(async (session) => {
-      for (const event of events as EventRow[]) {
-        const { id: eventId, pdga_event_id: pdgaEventId, name } = event;
-        console.log(`syncEventPlayers: scraping players for "${name}" (${pdgaEventId})`);
+  for (const event of events as EventRow[]) {
+    const { id: eventId, pdga_event_id: pdgaEventId, name } = event;
+    console.log(`syncEventPlayers: scraping players for "${name}" (${pdgaEventId})`);
 
-        let players;
-        try {
-          players = await scrapeEventPlayers(pdgaEventId, session);
-        } catch (err) {
-          const msg = `scrapeEventPlayers failed for event ${pdgaEventId}: ${err instanceof Error ? err.message : err}`;
-          console.error('syncEventPlayers:', msg);
-          errors.push(msg);
-          continue;
-        }
+    let players;
+    try {
+      players = await scrapeEventPlayers(pdgaEventId);
+    } catch (err) {
+      const msg = `scrapeEventPlayers failed for event ${pdgaEventId}: ${err instanceof Error ? err.message : err}`;
+      console.error('syncEventPlayers:', msg);
+      errors.push(msg);
+      continue;
+    }
 
-        if (players.length === 0) {
-          console.warn(`syncEventPlayers: no players scraped for event ${pdgaEventId}`);
-          continue;
-        }
+    if (players.length === 0) {
+      console.warn(`syncEventPlayers: no players scraped for event ${pdgaEventId}`);
+      continue;
+    }
 
-        const upsertRows = players.map((p) => ({
-          event_id: eventId,
-          pdga_number: p.pdgaNumber,
-          name: p.name,
-          pdga_rating: p.pdgaRating,
-          nationality: p.nationality,
-        }));
+    const upsertRows = players.map((p) => ({
+      event_id: eventId,
+      pdga_number: p.pdgaNumber,
+      name: p.name,
+      pdga_rating: p.pdgaRating,
+      nationality: p.nationality,
+    }));
 
-        const { error: upsertError } = await supabase
-          .from('event_players')
-          .upsert(upsertRows, { onConflict: 'event_id,pdga_number' });
+    const { error: upsertError } = await supabase
+      .from('event_players')
+      .upsert(upsertRows, { onConflict: 'event_id,pdga_number' });
 
-        if (upsertError) {
-          const msg = `Upsert failed for event ${pdgaEventId}: ${upsertError.message}`;
-          console.error('syncEventPlayers:', msg);
-          errors.push(msg);
-          continue;
-        }
+    if (upsertError) {
+      const msg = `Upsert failed for event ${pdgaEventId}: ${upsertError.message}`;
+      console.error('syncEventPlayers:', msg);
+      errors.push(msg);
+      continue;
+    }
 
-        totalPlayers += players.length;
-        console.log(`syncEventPlayers: upserted ${players.length} players for event ${pdgaEventId}`);
-      }
-    });
-  } catch (err) {
-    const msg = `PDGA session error: ${err instanceof Error ? err.message : String(err)}`;
-    console.error('syncEventPlayers:', msg);
-    await logRun({ job: 'sync_players', status: 'error', message: msg, duration_ms: Date.now() - startMs });
-    process.exit(1);
+    totalPlayers += players.length;
+    console.log(`syncEventPlayers: upserted ${players.length} players for event ${pdgaEventId}`);
   }
 
   const duration = Date.now() - startMs;

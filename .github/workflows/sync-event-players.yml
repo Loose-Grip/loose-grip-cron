@@ -26,5 +26,3 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          PDGA_USERNAME: ${{ secrets.PDGA_USERNAME }}
-          PDGA_PASSWORD: ${{ secrets.PDGA_PASSWORD }}
