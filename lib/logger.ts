@@ -1,6 +1,6 @@
 import { supabase } from './supabase';
 
-export type JobName = 'sync_events' | 'sync_players' | 'sync_scores' | 'check_timers' | 'check_completion';
+export type JobName = 'sync_events' | 'sync_players' | 'sync_scores' | 'check_timers' | 'check_completion' | 'open_draft';
 export type JobStatus = 'success' | 'error' | 'skipped';
 
 export interface ScraperLogEntry {

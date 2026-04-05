@@ -1,0 +1,31 @@
+name: Open Draft
+
+on:
+  schedule:
+    # Every 15 minutes during 23:00–11:00 UTC (= 09:00–21:00 AEDT)
+    # Script also guards with isInActiveWindow() for DST safety
+    - cron: '*/15 23,0,1,2,3,4,5,6,7,8,9,10,11 * * *'
+  workflow_dispatch:
+
+jobs:
+  open-draft:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run openDraft
+        run: npx tsx scripts/openDraft.ts
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          CRON_SERVICE_TOKEN: ${{ secrets.CRON_SERVICE_TOKEN }}
+          NEXT_PUBLIC_APP_URL: ${{ secrets.NEXT_PUBLIC_APP_URL }}
