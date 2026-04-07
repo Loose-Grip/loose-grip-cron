@@ -4,21 +4,23 @@
  * Triggers the /api/cron/check-pick-timers route in the main Next.js app.
  * All business logic lives there — this script is just the scheduled trigger.
  *
- * Exits early if the current time is outside 09:00–21:00 Melbourne.
- * Runs every 5 minutes via GitHub Actions; the early-exit keeps PDGA/DB
- * traffic contained to the active window.
+ * Exits early if the current time is outside 09:00–22:00 Melbourne.
+ * The cron runs until 22:00 (not 21:00) to catch picks that expire right at
+ * the 21:00 active-window boundary — without this buffer, an expiry at 20:59
+ * might not be processed until 09:00 the next morning.
  */
 
 import axios from 'axios';
-import { isInActiveWindow } from '../lib/draft/pickTimer';
+import { getMelbourneHour } from '../lib/draft/pickTimer';
 import { logRun } from '../lib/logger';
 
 async function main(): Promise<void> {
   const startMs = Date.now();
 
-  if (!isInActiveWindow(new Date())) {
-    console.log('checkPickTimers: outside active window (09:00–21:00 Melbourne) — skipping');
-    await logRun({ job: 'check_timers', status: 'skipped', message: 'Outside active window', duration_ms: Date.now() - startMs });
+  const melbourneHour = getMelbourneHour(new Date());
+  if (melbourneHour < 9 || melbourneHour >= 22) {
+    console.log(`checkPickTimers: outside run window (09:00–22:00 Melbourne, current hour=${melbourneHour}) — skipping`);
+    await logRun({ job: 'check_timers', status: 'skipped', message: 'Outside run window', duration_ms: Date.now() - startMs });
     process.exit(0);
   }
 
