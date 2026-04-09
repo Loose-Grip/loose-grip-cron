@@ -149,7 +149,7 @@ async function main(): Promise<void> {
     try {
       await axios.post(
         `${appUrl}/api/cron/sync-scores`,
-        {},
+        { event_id: eventId, round_number: currentRound },
         { headers: { 'X-Service-Token': token }, timeout: 30_000 }
       );
       console.log(`syncScores: triggered sync-scores callback for event ${pdgaEventId}`);
