@@ -125,7 +125,7 @@ async function main(): Promise<void> {
           event_id: eventId,
           event_player_id: eventPlayerId,
           round_number: s.roundNumber,
-          strokes_raw: s.strokes,
+          strokes: s.strokes,
           source: 'scraper',
         };
       })
