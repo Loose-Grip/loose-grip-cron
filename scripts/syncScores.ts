@@ -15,7 +15,7 @@ import { logRun } from '../lib/logger';
 interface EventRow {
   id: string;
   pdga_event_id: string;
-  current_round: number;
+  num_rounds: number;
 }
 
 interface EventPlayerRow {
@@ -39,7 +39,7 @@ async function main(): Promise<void> {
   // Fetch in-progress events
   const { data: events, error: eventsError } = await supabase
     .from('events')
-    .select('id, pdga_event_id, current_round')
+    .select('id, pdga_event_id, num_rounds')
     .eq('status', 'in_progress');
 
   if (eventsError) {
@@ -60,7 +60,17 @@ async function main(): Promise<void> {
   const errors: string[] = [];
 
   for (const event of events as EventRow[]) {
-    const { id: eventId, pdga_event_id: pdgaEventId, current_round: currentRound } = event;
+    const { id: eventId, pdga_event_id: pdgaEventId, num_rounds: numRounds } = event;
+
+    // Derive current round from highest round already in scores table (or 1 if none)
+    const { data: latestScore } = await supabase
+      .from('scores')
+      .select('round_number')
+      .eq('event_id', eventId)
+      .order('round_number', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const currentRound = Math.min((latestScore?.round_number ?? 0) + 1, numRounds ?? 4);
 
     console.log(`syncScores: processing event ${pdgaEventId} (id=${eventId}) round ${currentRound}`);
 
