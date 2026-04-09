@@ -156,17 +156,18 @@ async function main(): Promise<void> {
     console.log(`syncScores: upserted ${upsertRows.length} score rows for event ${pdgaEventId}`);
 
     // Trigger recalculation
+    const callbackUrl = `${appUrl.replace(/\/$/, '')}/api/cron/sync-scores`;
+    console.log(`syncScores: calling recalculate at ${callbackUrl}`);
     try {
       await axios.post(
-        `${appUrl}/api/cron/sync-scores`,
+        callbackUrl,
         { event_id: eventId, round_number: currentRound },
         { headers: { 'X-Service-Token': token }, timeout: 30_000 }
       );
       console.log(`syncScores: triggered sync-scores callback for event ${pdgaEventId}`);
     } catch (err) {
-      const msg = `sync-scores callback failed for event ${pdgaEventId}: ${err instanceof Error ? err.message : err}`;
-      console.error('syncScores:', msg);
-      errors.push(msg);
+      // Non-fatal — scores are already in DB, recalculation can retry next run
+      console.warn(`syncScores: sync-scores callback failed for event ${pdgaEventId} (non-fatal): ${err instanceof Error ? err.message : err}`);
     }
   }
 
