@@ -66,7 +66,8 @@ async function fetchLiveScores(
       if (!pdgaNumber) return;
 
       const totalText = $row.find('td.total').text().trim();
-      const strokes = parseInt(totalText, 10);
+      // "E" means even par = 0 strokes relative to par
+      const strokes = totalText === 'E' ? 0 : parseInt(totalText, 10);
       if (isNaN(strokes)) return;
 
       results.push({ pdgaNumber, roundNumber, strokes });
