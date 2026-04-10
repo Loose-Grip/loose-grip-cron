@@ -62,7 +62,7 @@ async function main(): Promise<void> {
   for (const event of events as EventRow[]) {
     const { id: eventId, pdga_event_id: pdgaEventId, num_rounds: numRounds } = event;
 
-    // Derive current round from highest round already in scores table (or 1 if none)
+    // Active round = highest round already in scores table (or 1 if none)
     const { data: latestScore } = await supabase
       .from('scores')
       .select('round_number')
@@ -70,22 +70,42 @@ async function main(): Promise<void> {
       .order('round_number', { ascending: false })
       .limit(1)
       .maybeSingle();
-    const currentRound = Math.min((latestScore?.round_number ?? 0) + 1, numRounds ?? 4);
+    const activeRound = latestScore?.round_number ?? 1;
+    const maxRounds = numRounds ?? 4;
 
-    console.log(`syncScores: processing event ${pdgaEventId} (id=${eventId}) round ${currentRound}`);
+    // Always re-scrape the active round to keep scores fresh.
+    // Only advance to the next round if PDGA returns >= 10 scores for it
+    // (guards against stale/pre-loaded data on rounds not yet started).
+    let currentRound = activeRound;
+    let scores: Awaited<ReturnType<typeof fetchEventScores>>;
 
-    // Fetch scores from PDGA
-    let scores;
+    console.log(`syncScores: processing event ${pdgaEventId} (id=${eventId}) active round ${activeRound}`);
+
     try {
-      scores = await fetchEventScores(pdgaEventId, currentRound);
+      scores = await fetchEventScores(pdgaEventId, activeRound);
     } catch (err) {
-      const msg = `fetchEventScores failed for event ${pdgaEventId}: ${err instanceof Error ? err.message : err}`;
+      const msg = `fetchEventScores failed for event ${pdgaEventId} R${activeRound}: ${err instanceof Error ? err.message : err}`;
       console.error('syncScores:', msg);
       errors.push(msg);
-
       await supabase.from('events').update({ scores_stale: true }).eq('id', eventId);
       continue;
     }
+
+    // Check if next round has started (requires meaningful score count)
+    if (activeRound < maxRounds) {
+      try {
+        const nextRoundScores = await fetchEventScores(pdgaEventId, activeRound + 1);
+        if (nextRoundScores.length >= 10) {
+          console.log(`syncScores: R${activeRound + 1} has started (${nextRoundScores.length} scores) — advancing`);
+          currentRound = activeRound + 1;
+          scores = nextRoundScores;
+        }
+      } catch {
+        // Non-fatal — stick with activeRound
+      }
+    }
+
+    console.log(`syncScores: scraping R${currentRound} for event ${pdgaEventId} (${scores.length} scores)`);
 
     if (scores.length === 0) {
       const msg = `No scores returned for event ${pdgaEventId} R${currentRound}`;
