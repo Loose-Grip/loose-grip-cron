@@ -78,10 +78,10 @@ async function scrapeHtmlScores(
       if (parseInt(roundMatch[1], 10) !== roundNumber) return;
 
       const text = $(link).text().trim();
-      // Only accept pure integers — tee times like "9:13 am" would otherwise
-      // pass parseInt (returns 9) since it reads digits until a non-digit char.
-      if (!/^\d+$/.test(text)) return;
-      const strokes = parseInt(text, 10);
+      // Accept par-relative integers (e.g. "-9", "+2", "12") and "E" (even par = 0).
+      // Reject tee times like "9:13 am" — these are NOT pure digit strings.
+      if (!/^[+-]?\d+$/.test(text) && text.toUpperCase() !== 'E') return;
+      const strokes = text.toUpperCase() === 'E' ? 0 : parseInt(text, 10);
 
       results.push({ pdgaNumber, roundNumber, strokes });
     });
