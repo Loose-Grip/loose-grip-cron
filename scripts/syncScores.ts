@@ -9,7 +9,7 @@
 
 import axios from 'axios';
 import { supabase } from '../lib/supabase';
-import { fetchEventScores } from '../lib/scraper/pdgaScores';
+import { fetchEventScores, fetchLatestTeeTime } from '../lib/scraper/pdgaScores';
 import { logRun } from '../lib/logger';
 
 interface EventRow {
@@ -17,6 +17,8 @@ interface EventRow {
   pdga_event_id: string;
   num_rounds: number;
   current_round: number;
+  timezone: string;
+  next_round_starts_at: string | null;
 }
 
 interface EventPlayerRow {
@@ -40,7 +42,7 @@ async function main(): Promise<void> {
   // Fetch in-progress events
   const { data: events, error: eventsError } = await supabase
     .from('events')
-    .select('id, pdga_event_id, num_rounds, current_round')
+    .select('id, pdga_event_id, num_rounds, current_round, timezone, next_round_starts_at')
     .eq('status', 'in_progress');
 
   if (eventsError) {
@@ -61,26 +63,60 @@ async function main(): Promise<void> {
   const errors: string[] = [];
 
   for (const event of events as EventRow[]) {
-    const { id: eventId, pdga_event_id: pdgaEventId, current_round: currentRound } = event;
+    const { id: eventId, pdga_event_id: pdgaEventId, num_rounds: numRounds, timezone } = event;
+    const maxRounds = numRounds ?? 4;
+    const eventTimezone = timezone ?? 'America/New_York';
 
-    console.log(`syncScores: processing event ${pdgaEventId} (id=${eventId}) current_round=${currentRound}`);
+    console.log(`syncScores: processing event ${pdgaEventId} (id=${eventId}) current_round=${event.current_round}`);
 
+    // Auto-advance: check if next round's last tee time has passed
+    if (event.current_round < maxRounds) {
+      const now = new Date();
+      let advanceRound = false;
+
+      if (event.next_round_starts_at) {
+        // Already have a stored tee time — just check if it's passed
+        advanceRound = now >= new Date(event.next_round_starts_at);
+        if (advanceRound) {
+          console.log(`syncScores: R${event.current_round + 1} tee time passed (${event.next_round_starts_at}) — auto-advancing`);
+        }
+      } else {
+        // Scrape tee times for next round and store the latest
+        const roundDate = new Date().toISOString().slice(0, 10);
+        const latestTeeTime = await fetchLatestTeeTime(pdgaEventId, event.current_round + 1, eventTimezone, roundDate);
+        if (latestTeeTime) {
+          await supabase.from('events').update({ next_round_starts_at: latestTeeTime.toISOString() }).eq('id', eventId);
+          console.log(`syncScores: stored R${event.current_round + 1} last tee time: ${latestTeeTime.toISOString()}`);
+          advanceRound = now >= latestTeeTime;
+        }
+      }
+
+      if (advanceRound) {
+        const newRound = event.current_round + 1;
+        await supabase.from('events').update({ current_round: newRound, next_round_starts_at: null }).eq('id', eventId);
+        console.log(`syncScores: advanced to R${newRound}`);
+        event.current_round = newRound;
+        event.next_round_starts_at = null;
+      }
+    }
+
+    const roundToScrape = event.current_round;
     let scores: Awaited<ReturnType<typeof fetchEventScores>>;
 
     try {
-      scores = await fetchEventScores(pdgaEventId, currentRound);
+      scores = await fetchEventScores(pdgaEventId, roundToScrape);
     } catch (err) {
-      const msg = `fetchEventScores failed for event ${pdgaEventId} R${currentRound}: ${err instanceof Error ? err.message : err}`;
+      const msg = `fetchEventScores failed for event ${pdgaEventId} R${roundToScrape}: ${err instanceof Error ? err.message : err}`;
       console.error('syncScores:', msg);
       errors.push(msg);
       await supabase.from('events').update({ scores_stale: true }).eq('id', eventId);
       continue;
     }
 
-    console.log(`syncScores: scraping R${currentRound} for event ${pdgaEventId} (${scores.length} scores)`);
+    console.log(`syncScores: scraping R${roundToScrape} for event ${pdgaEventId} (${scores.length} scores)`);
 
     if (scores.length === 0) {
-      const msg = `No scores returned for event ${pdgaEventId} R${currentRound}`;
+      const msg = `No scores returned for event ${pdgaEventId} R${roundToScrape}`;
       console.warn('syncScores:', msg);
       errors.push(msg);
       await supabase.from('events').update({ scores_stale: true }).eq('id', eventId);
@@ -153,7 +189,7 @@ async function main(): Promise<void> {
     try {
       await axios.post(
         callbackUrl,
-        { event_id: eventId, round_number: currentRound },
+        { event_id: eventId, round_number: roundToScrape },
         { headers: { 'X-Service-Token': token }, timeout: 30_000 }
       );
       console.log(`syncScores: triggered sync-scores callback for event ${pdgaEventId}`);
