@@ -140,8 +140,11 @@ async function scrapeHtmlScores(
       if (!roundMatch) return;
       if (parseInt(roundMatch[1], 10) !== roundNumber) return;
 
-      const strokes = parseInt($(link).text().trim(), 10);
-      if (isNaN(strokes)) return;
+      const text = $(link).text().trim();
+      // Only accept pure integers — tee times like "9:13 am" would otherwise
+      // pass parseInt (returns 9) since it reads digits until a non-digit char.
+      if (!/^\d+$/.test(text)) return;
+      const strokes = parseInt(text, 10);
 
       results.push({ pdgaNumber, roundNumber, strokes });
     });
