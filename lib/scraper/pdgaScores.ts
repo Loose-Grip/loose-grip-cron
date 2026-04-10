@@ -21,7 +21,6 @@
  *   latest as a UTC Date for round-start detection.
  */
 
-import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { fetchWithRetry } from './rateLimiter';
 
@@ -29,69 +28,6 @@ export interface ScrapedScore {
   pdgaNumber: string;
   roundNumber: number;
   strokes: number;
-}
-
-// ---------------------------------------------------------------------------
-// Layer 2 — PDGA live scores page (primary)
-// ---------------------------------------------------------------------------
-
-/**
- * The live scores page URL pattern, discovered from round links on the event page:
- *   https://www.pdga.com/live/event/{eventId}/MPO/scores?round={n}
- *
- * This page returns an HTML table of hole-by-hole scores.
- * We parse the total strokes from the "total" cell per player.
- *
- * Structure (provisional — verify on a live event):
- *   <tr>
- *     <td class="pdga-number">75412</td>
- *     <td class="total">54</td>  ← round total strokes
- *   </tr>
- */
-async function fetchLiveScores(
-  pdgaEventId: string,
-  roundNumber: number
-): Promise<ScrapedScore[] | null> {
-  const url = `https://www.pdga.com/live/event/${encodeURIComponent(pdgaEventId)}/MPO/scores?round=${roundNumber}`;
-
-  try {
-    const html = await fetchWithRetry(url);
-    const $ = cheerio.load(html);
-
-    const results: ScrapedScore[] = [];
-
-    $('tbody tr').each((_, row) => {
-      const $row = $(row);
-      const pdgaNumber = $row.find('td.pdga-number').text().trim();
-      if (!pdgaNumber) return;
-
-      const totalText = $row.find('td.total').text().trim();
-      // "E" means even par = 0 strokes relative to par
-      const strokes = totalText === 'E' ? 0 : parseInt(totalText, 10);
-      if (isNaN(strokes)) return;
-
-      results.push({ pdgaNumber, roundNumber, strokes });
-    });
-
-    if (results.length > 0) {
-      return results;
-    }
-
-    console.warn(`Layer 2: no scores parsed from live page for event ${pdgaEventId} R${roundNumber}`);
-    return null;
-  } catch (err) {
-    if (axios.isAxiosError(err)) {
-      console.warn(
-        `Layer 2 live scores failed (HTTP ${err.response?.status ?? 'n/a'}) for event ${pdgaEventId} R${roundNumber}; falling through to Layer 3`
-      );
-    } else {
-      console.warn(
-        `Layer 2 threw for event ${pdgaEventId} R${roundNumber}; falling through to Layer 3:`,
-        err instanceof Error ? err.message : err
-      );
-    }
-    return null;
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -253,16 +189,7 @@ export async function fetchEventScores(
   pdgaEventId: string,
   roundNumber: number
 ): Promise<ScrapedScore[]> {
-  const liveScores = await fetchLiveScores(pdgaEventId, roundNumber);
-  if (liveScores !== null) {
-    console.log(
-      `fetchEventScores: Layer 2 returned ${liveScores.length} scores for event ${pdgaEventId} R${roundNumber}`
-    );
-    return liveScores;
-  }
-
-  console.log(
-    `fetchEventScores: falling back to Layer 3 (HTML scrape) for event ${pdgaEventId} R${roundNumber}`
-  );
+  // Layer 2 (live scores page) returns par-relative totals, not absolute stroke counts.
+  // Layer 3 (main event page) returns absolute stroke counts — the only reliable source.
   return scrapeHtmlScores(pdgaEventId, roundNumber);
 }
