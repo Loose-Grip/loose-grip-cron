@@ -100,30 +100,7 @@ async function main(): Promise<void> {
       }
     }
 
-    const roundToScrape = event.current_round;
-    let scores: Awaited<ReturnType<typeof fetchEventScores>>;
-
-    try {
-      scores = await fetchEventScores(pdgaEventId, roundToScrape);
-    } catch (err) {
-      const msg = `fetchEventScores failed for event ${pdgaEventId} R${roundToScrape}: ${err instanceof Error ? err.message : err}`;
-      console.error('syncScores:', msg);
-      errors.push(msg);
-      await supabase.from('events').update({ scores_stale: true }).eq('id', eventId);
-      continue;
-    }
-
-    console.log(`syncScores: scraping R${roundToScrape} for event ${pdgaEventId} (${scores.length} scores)`);
-
-    if (scores.length === 0) {
-      const msg = `No scores returned for event ${pdgaEventId} R${roundToScrape}`;
-      console.warn('syncScores:', msg);
-      errors.push(msg);
-      await supabase.from('events').update({ scores_stale: true }).eq('id', eventId);
-      continue;
-    }
-
-    // Resolve pdga_number → event_player_id for this event
+    // Resolve pdga_number → event_player_id once per event (shared across all rounds)
     const { data: eventPlayers, error: epError } = await supabase
       .from('event_players')
       .select('id, pdga_number')
@@ -141,62 +118,83 @@ async function main(): Promise<void> {
       (eventPlayers as EventPlayerRow[]).map((p) => [p.pdga_number, p.id])
     );
 
-    // Build upsert rows
-    const upsertRows = scores
-      .map((s) => {
-        const eventPlayerId = playerMap.get(s.pdgaNumber);
-        if (!eventPlayerId) {
-          console.warn(`syncScores: no event_player found for PDGA #${s.pdgaNumber} in event ${eventId}`);
-          return null;
-        }
-        return {
-          event_id: eventId,
-          event_player_id: eventPlayerId,
-          round_number: s.roundNumber,
-          strokes: s.strokes,
-          source: 'scraper',
-        };
-      })
-      .filter((r): r is NonNullable<typeof r> => r !== null);
-
-    if (upsertRows.length === 0) {
-      const msg = `No resolvable players for scores in event ${pdgaEventId}`;
-      console.warn('syncScores:', msg);
-      errors.push(msg);
-      await supabase.from('events').update({ scores_stale: true }).eq('id', eventId);
-      continue;
-    }
-
-    const { error: upsertError } = await supabase
-      .from('scores')
-      .upsert(upsertRows, { onConflict: 'event_id,event_player_id,round_number' });
-
-    if (upsertError) {
-      const msg = `Upsert failed for event ${pdgaEventId}: ${upsertError.message}`;
-      console.error('syncScores:', msg);
-      errors.push(msg);
-      await supabase.from('events').update({ scores_stale: true }).eq('id', eventId);
-      continue;
-    }
-
-    // Mark scores as fresh
-    await supabase.from('events').update({ scores_stale: false }).eq('id', eventId);
-    console.log(`syncScores: upserted ${upsertRows.length} score rows for event ${pdgaEventId}`);
-
-    // Trigger recalculation
     const callbackUrl = `${appUrl.replace(/\/$/, '')}/api/cron/sync-scores`;
-    console.log(`syncScores: calling recalculate at ${callbackUrl}`);
-    try {
-      await axios.post(
-        callbackUrl,
-        { event_id: eventId, round_number: roundToScrape },
-        { headers: { 'X-Service-Token': token }, timeout: 30_000 }
-      );
-      console.log(`syncScores: triggered sync-scores callback for event ${pdgaEventId}`);
-    } catch (err) {
-      // Non-fatal — scores are already in DB, recalculation can retry next run
-      console.warn(`syncScores: sync-scores callback failed for event ${pdgaEventId} (non-fatal): ${err instanceof Error ? err.message : err}`);
+
+    // Scrape all rounds from 1 to current_round so previous rounds are backfilled
+    // if their data was ever lost. Upsert is idempotent — no duplicates created.
+    const currentRound = event.current_round;
+
+    for (let roundToScrape = 1; roundToScrape <= currentRound; roundToScrape++) {
+      let scores: Awaited<ReturnType<typeof fetchEventScores>>;
+
+      try {
+        scores = await fetchEventScores(pdgaEventId, roundToScrape);
+      } catch (err) {
+        const msg = `fetchEventScores failed for event ${pdgaEventId} R${roundToScrape}: ${err instanceof Error ? err.message : err}`;
+        console.error('syncScores:', msg);
+        errors.push(msg);
+        continue;
+      }
+
+      console.log(`syncScores: scraping R${roundToScrape} for event ${pdgaEventId} (${scores.length} scores)`);
+
+      if (scores.length === 0) {
+        console.warn(`syncScores: no scores for event ${pdgaEventId} R${roundToScrape} — skipping round`);
+        continue;
+      }
+
+      // Build upsert rows
+      const upsertRows = scores
+        .map((s) => {
+          const eventPlayerId = playerMap.get(s.pdgaNumber);
+          if (!eventPlayerId) {
+            console.warn(`syncScores: no event_player found for PDGA #${s.pdgaNumber} in event ${eventId}`);
+            return null;
+          }
+          return {
+            event_id: eventId,
+            event_player_id: eventPlayerId,
+            round_number: s.roundNumber,
+            strokes: s.strokes,
+            source: 'scraper',
+          };
+        })
+        .filter((r): r is NonNullable<typeof r> => r !== null);
+
+      if (upsertRows.length === 0) {
+        console.warn(`syncScores: no resolvable players for event ${pdgaEventId} R${roundToScrape} — skipping`);
+        continue;
+      }
+
+      const { error: upsertError } = await supabase
+        .from('scores')
+        .upsert(upsertRows, { onConflict: 'event_id,event_player_id,round_number' });
+
+      if (upsertError) {
+        const msg = `Upsert failed for event ${pdgaEventId} R${roundToScrape}: ${upsertError.message}`;
+        console.error('syncScores:', msg);
+        errors.push(msg);
+        continue;
+      }
+
+      console.log(`syncScores: upserted ${upsertRows.length} score rows for event ${pdgaEventId} R${roundToScrape}`);
+
+      // Trigger recalculation for this round
+      try {
+        await axios.post(
+          callbackUrl,
+          { event_id: eventId, round_number: roundToScrape },
+          { headers: { 'X-Service-Token': token }, timeout: 30_000 }
+        );
+        console.log(`syncScores: triggered recalculation for event ${pdgaEventId} R${roundToScrape}`);
+      } catch (err) {
+        // Non-fatal — scores are in DB, recalculation retries next run
+        console.warn(`syncScores: recalculation callback failed for event ${pdgaEventId} R${roundToScrape} (non-fatal): ${err instanceof Error ? err.message : err}`);
+      }
     }
+
+    // Mark event as fresh after all rounds processed
+    await supabase.from('events').update({ scores_stale: false }).eq('id', eventId);
   }
 
   const duration = Date.now() - startMs;
