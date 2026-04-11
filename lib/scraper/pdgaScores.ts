@@ -11,8 +11,8 @@
  *   MPO section: <details><summary><h3 class="division" id="MPO">...</h3></summary>
  *   Player row:
  *     <td class="pdga-number">75412</td>
- *     <td class="round"><a href="/live/event/97336/MPO/scores?round=1" class="score">54</a></td>
- *     <td class="round"><a href="/live/event/97336/MPO/scores?round=2" class="score">3:00 pm</a></td>
+ *     <td class="round"><a href="/live/event/97336/MPO/scores?round=1" class="score">60</a></td>  ← absolute strokes
+ *     <td class="round"><a href="/live/event/97336/MPO/scores?round=2" class="score">3:20 pm</a></td>  ← tee time (round not started)
  *     ...
  *
  * Tee time detection:
@@ -78,10 +78,10 @@ async function scrapeHtmlScores(
       if (parseInt(roundMatch[1], 10) !== roundNumber) return;
 
       const text = $(link).text().trim();
-      // Accept par-relative integers (e.g. "-9", "+2", "12") and "E" (even par = 0).
-      // Reject tee times like "9:13 am" — these are NOT pure digit strings.
-      if (!/^[+-]?\d+$/.test(text) && text.toUpperCase() !== 'E') return;
-      const strokes = text.toUpperCase() === 'E' ? 0 : parseInt(text, 10);
+      // Rd1/Rd2 cells contain absolute stroke counts — pure positive integers (e.g. "60", "65").
+      // Reject tee times like "9:13 am": parseInt("9:13 am") = 9, so must use regex not parseInt.
+      if (!/^\d+$/.test(text)) return;
+      const strokes = parseInt(text, 10);
 
       results.push({ pdgaNumber, roundNumber, strokes });
     });
