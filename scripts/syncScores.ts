@@ -195,10 +195,8 @@ async function main(): Promise<void> {
 
     // Scrape and upsert course_par into event_rounds for all completed rounds
     const roundPars = await scrapeAllRoundPars(pdgaEventId, maxRounds);
-    console.log(`syncScores: scrapeAllRoundPars returned ${roundPars.size} round(s) for event ${pdgaEventId}`);
     for (const [rn, par] of roundPars) {
-      console.log(`syncScores: upserting event_rounds event_id=${eventId} round_number=${rn} course_par=${par}`);
-      const { error: parError, status: parStatus } = await supabase.from('event_rounds').upsert(
+      const { error: parError } = await supabase.from('event_rounds').upsert(
         {
           event_id: eventId,
           round_number: rn,
@@ -209,10 +207,11 @@ async function main(): Promise<void> {
         { onConflict: 'event_id,round_number' }
       );
       if (parError) {
-        console.error(`syncScores: event_rounds upsert FAILED for event ${pdgaEventId} R${rn}: [${parStatus}] ${parError.message} ${parError.details ?? ''} ${parError.hint ?? ''}`);
-      } else {
-        console.log(`syncScores: event_rounds upsert OK for event ${pdgaEventId} R${rn} (HTTP ${parStatus})`);
+        console.error(`syncScores: event_rounds upsert failed for event ${pdgaEventId} R${rn}: ${parError.message}`);
       }
+    }
+    if (roundPars.size > 0) {
+      console.log(`syncScores: upserted course_par for ${roundPars.size} round(s) in event ${pdgaEventId}`);
     }
 
     // Mark event as fresh after all rounds processed

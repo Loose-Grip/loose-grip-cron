@@ -203,12 +203,9 @@ export async function scrapeAllRoundPars(
   numRounds: number
 ): Promise<Map<number, number>> {
   const url = `https://www.pdga.com/tour/event/${encodeURIComponent(pdgaEventId)}`;
-  console.log(`scrapeAllRoundPars: fetching ${url} (numRounds=${numRounds})`);
-
   let html: string;
   try {
     html = await fetchWithRetry(url);
-    console.log(`scrapeAllRoundPars: fetched ${html.length} bytes for event ${pdgaEventId}`);
   } catch (err) {
     console.warn(`scrapeAllRoundPars: failed to fetch event page for ${pdgaEventId}: ${err instanceof Error ? err.message : err}`);
     return new Map();
@@ -219,32 +216,19 @@ export async function scrapeAllRoundPars(
   // rawPars: keyed by PDGA round number from div id (may include 12 for Finals)
   const rawPars = new Map<number, number>();
 
-  // Selector: all divs whose id starts with layout-details-{eventId}-MPO-round-
   const prefix = `layout-details-${pdgaEventId}-MPO-round-`;
   $(`div[id^="${prefix}"]`).each((_, el) => {
     const id = $(el).attr('id') ?? '';
-    const roundStr = id.slice(prefix.length);
-    const pdgaRound = parseInt(roundStr, 10);
+    const pdgaRound = parseInt(id.slice(prefix.length), 10);
     if (isNaN(pdgaRound)) return;
-
-    const text = $(el).text();
-    const parMatch = text.match(/\bPar\s+(\d+)/i);
-    if (!parMatch) {
-      console.warn(`scrapeAllRoundPars: div#${id} found but no "Par N" in text: "${text.trim().slice(0, 80)}"`);
-      return;
-    }
-
-    const par = parseInt(parMatch[1], 10);
-    console.log(`scrapeAllRoundPars: div#${id} → Par ${par}`);
-    rawPars.set(pdgaRound, par);
+    const parMatch = $(el).text().match(/\bPar\s+(\d+)/i);
+    if (parMatch) rawPars.set(pdgaRound, parseInt(parMatch[1], 10));
   });
 
   if (rawPars.size === 0) {
-    console.warn(`scrapeAllRoundPars: no layout-details divs found for event ${pdgaEventId} (prefix="${prefix}")`);
+    console.warn(`scrapeAllRoundPars: no layout-details divs found for event ${pdgaEventId}`);
     return new Map();
   }
-
-  console.log(`scrapeAllRoundPars: raw par values — ${JSON.stringify(Object.fromEntries(rawPars))}`);
 
   // Normalize PDGA round numbers to sequential 1..numRounds:
   //   Rounds 1..numRounds-1 map directly.
@@ -258,11 +242,7 @@ export async function scrapeAllRoundPars(
   const finalPar = rawPars.get(12) ?? rawPars.get(numRounds);
   if (finalPar !== undefined) result.set(numRounds, finalPar);
 
-  console.log(
-    `scrapeAllRoundPars: result for event ${pdgaEventId} ` +
-    `(raw PDGA keys: [${[...rawPars.keys()].join(',')}] → sequential): ` +
-    JSON.stringify(Object.fromEntries(result))
-  );
+  console.log(`scrapeAllRoundPars: event ${pdgaEventId} → ${JSON.stringify(Object.fromEntries(result))}`);
 
   return result;
 }
