@@ -182,6 +182,154 @@ export async function fetchLatestTeeTime(
 }
 
 // ---------------------------------------------------------------------------
+// Course par scraping
+// ---------------------------------------------------------------------------
+
+/**
+ * Scrapes course par for all rounds from the main PDGA event page.
+ * Returns a map of sequential round_number (1..numRounds) → course_par.
+ *
+ * The par row is identified by finding a <tr> whose first <td> contains "Par"
+ * or "Course Par" (case-insensitive). Round values are extracted the same way
+ * as player scores: td.round a.score with href ?round={n}. Falls back to
+ * positional td.round cells if links are absent.
+ *
+ * Finals format handling: PDGA uses round=12 for the final round of Finals-format
+ * events (e.g. Champions Cup). Rounds 1..numRounds-1 are always sequential; for
+ * the final round, round=12 is preferred (Finals) with round=numRounds as fallback
+ * (standard). The returned map always uses sequential keys 1..numRounds regardless
+ * of PDGA's internal round numbering.
+ *
+ * Returns an empty map if the par row is not found — caller should log a warning
+ * but not fail (scoring engine falls back gracefully without par data).
+ */
+export async function scrapeAllRoundPars(
+  pdgaEventId: string,
+  numRounds: number
+): Promise<Map<number, number>> {
+  const url = `https://www.pdga.com/tour/event/${encodeURIComponent(pdgaEventId)}`;
+  console.log(`scrapeAllRoundPars: fetching ${url} (numRounds=${numRounds})`);
+
+  let html: string;
+  try {
+    html = await fetchWithRetry(url);
+    console.log(`scrapeAllRoundPars: fetched ${html.length} bytes for event ${pdgaEventId}`);
+  } catch (err) {
+    console.warn(`scrapeAllRoundPars: failed to fetch event page for ${pdgaEventId}: ${err instanceof Error ? err.message : err}`);
+    return new Map();
+  }
+
+  const $ = cheerio.load(html);
+
+  const $mpoHeading = $('h3.division#MPO');
+  if ($mpoHeading.length === 0) {
+    console.warn(`scrapeAllRoundPars: no MPO section found for event ${pdgaEventId}`);
+    return new Map();
+  }
+  console.log(`scrapeAllRoundPars: MPO section found for event ${pdgaEventId}`);
+
+  const $details = $mpoHeading.closest('details');
+  const $table = $details.find('table');
+  const tableRowCount = $table.find('tr').length;
+  console.log(`scrapeAllRoundPars: MPO table has ${tableRowCount} row(s)`);
+
+  // rawPars: keyed by PDGA round number (may include 12 for Finals format)
+  const rawPars = new Map<number, number>();
+  let usedPositional = false;
+  let parRowFound = false;
+
+  // Search all rows (thead, tbody, tfoot) for the par row
+  $table.find('tr').each((_, row) => {
+    if (rawPars.size > 0 || usedPositional) return; // already found
+
+    const $row = $(row);
+    const $tds = $row.find('td');
+    if ($tds.length === 0) return; // header row (th only)
+
+    // Identify par row: first td text is "par" / "course par",
+    // or any td in the row has exactly that text
+    const firstTdText = $($tds[0]).text().trim().toLowerCase();
+    const isParRow =
+      firstTdText === 'par' ||
+      firstTdText === 'course par' ||
+      $tds.toArray().some((td) => $(td).text().trim().toLowerCase() === 'par');
+
+    if (!isParRow) return;
+
+    parRowFound = true;
+    console.log(`scrapeAllRoundPars: par row found (firstTd="${$($tds[0]).text().trim()}", tdCount=${$tds.length})`);
+
+    // Primary: td.round a.score (or any a) with href containing ?round=N
+    // PDGA uses round=1..N-1 for standard rounds, round=12 for Finals final round
+    $row.find('td.round a.score, td.round a').each((_, link) => {
+      const href = $(link).attr('href') ?? '';
+      const roundMatch = href.match(/[?&]round=(\d+)/);
+      if (!roundMatch) return;
+      const rn = parseInt(roundMatch[1], 10);
+      const text = $(link).text().trim();
+      console.log(`scrapeAllRoundPars: par row link — round=${rn} text="${text}" href="${href}"`);
+      if (/^\d+$/.test(text)) {
+        rawPars.set(rn, parseInt(text, 10));
+      }
+    });
+
+    // Fallback: positional td.round cells (round 1 = index 0, etc.)
+    // Positional cells are already sequential — no Finals normalization needed
+    if (rawPars.size === 0) {
+      console.log(`scrapeAllRoundPars: no links found in par row — trying positional td.round cells`);
+      $row.find('td.round').each((idx, cell) => {
+        const text = $(cell).text().trim();
+        console.log(`scrapeAllRoundPars: positional cell idx=${idx} text="${text}"`);
+        if (/^\d+$/.test(text)) {
+          rawPars.set(idx + 1, parseInt(text, 10));
+          usedPositional = true;
+        }
+      });
+    }
+  });
+
+  if (!parRowFound) {
+    console.warn(`scrapeAllRoundPars: par row not found — scanned ${tableRowCount} rows. First-td texts: [${
+      $table.find('tr').toArray().map((r) => $(r).find('td').first().text().trim().slice(0, 20)).filter(Boolean).join(', ')
+    }]`);
+  }
+
+  if (rawPars.size === 0) {
+    console.warn(`scrapeAllRoundPars: par row ${parRowFound ? 'found but no values extracted' : 'not found'} for event ${pdgaEventId}`);
+    return new Map();
+  }
+
+  console.log(`scrapeAllRoundPars: raw par values — ${JSON.stringify(Object.fromEntries(rawPars))} (usedPositional=${usedPositional})`);
+
+  // Normalize PDGA round numbers to sequential 1..numRounds:
+  //   Rounds 1..numRounds-1 map directly.
+  //   Final round: prefer round=12 (Finals format), fall back to round=numRounds (standard).
+  //   Positional fallback is already sequential — skip normalization.
+  const result = new Map<number, number>();
+
+  if (usedPositional) {
+    // Already sequential
+    for (const [rn, par] of rawPars) result.set(rn, par);
+  } else {
+    for (let rn = 1; rn < numRounds; rn++) {
+      const par = rawPars.get(rn);
+      if (par !== undefined) result.set(rn, par);
+    }
+    // Final round
+    const finalPar = rawPars.get(12) ?? rawPars.get(numRounds);
+    if (finalPar !== undefined) result.set(numRounds, finalPar);
+  }
+
+  console.log(
+    `scrapeAllRoundPars: normalized result for event ${pdgaEventId} ` +
+    `(raw PDGA keys: [${[...rawPars.keys()].join(',')}] → sequential): ` +
+    JSON.stringify(Object.fromEntries(result))
+  );
+
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // Public API — tries Layer 2 then falls back to Layer 3
 // ---------------------------------------------------------------------------
 

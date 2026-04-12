@@ -9,7 +9,7 @@
 
 import axios from 'axios';
 import { supabase } from '../lib/supabase';
-import { fetchEventScores, fetchLatestTeeTime } from '../lib/scraper/pdgaScores';
+import { fetchEventScores, fetchLatestTeeTime, scrapeAllRoundPars } from '../lib/scraper/pdgaScores';
 import { logRun } from '../lib/logger';
 
 interface EventRow {
@@ -190,6 +190,28 @@ async function main(): Promise<void> {
       } catch (err) {
         // Non-fatal — scores are in DB, recalculation retries next run
         console.warn(`syncScores: recalculation callback failed for event ${pdgaEventId} R${roundToScrape} (non-fatal): ${err instanceof Error ? err.message : err}`);
+      }
+    }
+
+    // Scrape and upsert course_par into event_rounds for all completed rounds
+    const roundPars = await scrapeAllRoundPars(pdgaEventId, maxRounds);
+    console.log(`syncScores: scrapeAllRoundPars returned ${roundPars.size} round(s) for event ${pdgaEventId}`);
+    for (const [rn, par] of roundPars) {
+      console.log(`syncScores: upserting event_rounds event_id=${eventId} round_number=${rn} course_par=${par}`);
+      const { error: parError, status: parStatus } = await supabase.from('event_rounds').upsert(
+        {
+          event_id: eventId,
+          round_number: rn,
+          course_par: par,
+          course_name: null,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'event_id,round_number' }
+      );
+      if (parError) {
+        console.error(`syncScores: event_rounds upsert FAILED for event ${pdgaEventId} R${rn}: [${parStatus}] ${parError.message} ${parError.details ?? ''} ${parError.hint ?? ''}`);
+      } else {
+        console.log(`syncScores: event_rounds upsert OK for event ${pdgaEventId} R${rn} (HTTP ${parStatus})`);
       }
     }
 
