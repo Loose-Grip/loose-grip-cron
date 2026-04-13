@@ -99,7 +99,7 @@ async function main(): Promise<void> {
       let scores: Awaited<ReturnType<typeof fetchEventScores>>;
 
       try {
-        scores = await fetchEventScores(pdgaEventId, roundToScrape);
+        scores = await fetchEventScores(pdgaEventId, roundToScrape, maxRounds);
       } catch (err) {
         const msg = `fetchEventScores failed for event ${pdgaEventId} R${roundToScrape}: ${err instanceof Error ? err.message : err}`;
         console.error('syncScores:', msg);

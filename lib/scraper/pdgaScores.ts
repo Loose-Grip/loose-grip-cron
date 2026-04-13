@@ -46,7 +46,8 @@ export interface ScrapedScore {
  */
 async function scrapeHtmlScores(
   pdgaEventId: string,
-  roundNumber: number
+  roundNumber: number,
+  numRounds?: number
 ): Promise<ScrapedScore[]> {
   const url = `https://www.pdga.com/tour/event/${encodeURIComponent(pdgaEventId)}`;
   const html = await fetchWithRetry(url);
@@ -64,6 +65,11 @@ async function scrapeHtmlScores(
   const $details = $mpoHeading.closest('details');
   const $table = $details.find('table');
 
+  // PDGA uses round=12 for Finals rounds (cut-line and pooled formats).
+  // When scraping the final round, accept both round={roundNumber} and round=12.
+  const isFinalRound = numRounds !== undefined && roundNumber === numRounds;
+  const acceptedPdgaRounds = new Set([roundNumber, ...(isFinalRound ? [12] : [])]);
+
   $table.find('tbody tr').each((_, row) => {
     const $row = $(row);
     const pdgaNumber = $row.find('td.pdga-number').text().trim();
@@ -75,7 +81,7 @@ async function scrapeHtmlScores(
       const href = $(link).attr('href') ?? '';
       const roundMatch = href.match(/[?&]round=(\d+)/);
       if (!roundMatch) return;
-      if (parseInt(roundMatch[1], 10) !== roundNumber) return;
+      if (!acceptedPdgaRounds.has(parseInt(roundMatch[1], 10))) return;
 
       const text = $(link).text().trim();
       // Rd1/Rd2 cells contain absolute stroke counts — pure positive integers (e.g. "60", "65").
@@ -253,9 +259,10 @@ export async function scrapeAllRoundPars(
 
 export async function fetchEventScores(
   pdgaEventId: string,
-  roundNumber: number
+  roundNumber: number,
+  numRounds?: number
 ): Promise<ScrapedScore[]> {
   // Layer 2 (live scores page) returns par-relative totals, not absolute stroke counts.
   // Layer 3 (main event page) returns absolute stroke counts — the only reliable source.
-  return scrapeHtmlScores(pdgaEventId, roundNumber);
+  return scrapeHtmlScores(pdgaEventId, roundNumber, numRounds);
 }
