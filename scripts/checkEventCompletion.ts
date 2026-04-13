@@ -1,28 +1,27 @@
 /**
  * checkEventCompletion.ts
  *
- * For each in-progress event, checks whether all rounds are complete by
- * comparing distinct (event_player_id, round_number) combinations against
- * the expected total: num_rounds × active_player_count.
+ * For each in-progress event, auto-completes the event once
+ * end_date + 36 hours has passed and all rounds have at least one score row.
  *
- * If complete AND scores_stale = false, calls the event completion endpoint
- * in the main Next.js app.
+ * The 36-hour buffer gives participants time to see the final leaderboard
+ * on the active event card before it moves to the "Past events" archive.
+ *
+ * Calls POST /api/cron/complete-event (service-token protected).
  */
 
 import axios from 'axios';
 import { supabase } from '../lib/supabase';
 import { logRun } from '../lib/logger';
 
+const COMPLETE_AFTER_HOURS = 36;
+
 interface EventRow {
   id: string;
   pdga_event_id: string;
   num_rounds: number;
+  end_date: string | null;
   scores_stale: boolean;
-}
-
-interface ScoreCountRow {
-  event_player_id: string;
-  round_number: number;
 }
 
 async function main(): Promise<void> {
@@ -40,7 +39,7 @@ async function main(): Promise<void> {
 
   const { data: events, error: eventsError } = await supabase
     .from('events')
-    .select('id, pdga_event_id, num_rounds, scores_stale')
+    .select('id, pdga_event_id, num_rounds, end_date, scores_stale')
     .eq('status', 'in_progress');
 
   if (eventsError) {
@@ -59,83 +58,52 @@ async function main(): Promise<void> {
   const errors: string[] = [];
 
   for (const event of events as EventRow[]) {
-    const { id: eventId, pdga_event_id: pdgaEventId, num_rounds: numRounds, scores_stale: scoresStale } = event;
+    const { id: eventId, pdga_event_id: pdgaEventId, num_rounds: numRounds, end_date: endDate, scores_stale: scoresStale } = event;
 
-    // Count distinct (event_player_id) to find active player count for this event
-    const { data: playerCountData, error: playerCountError } = await supabase
-      .from('event_players')
-      .select('id', { count: 'exact', head: true })
-      .eq('event_id', eventId);
-
-    if (playerCountError) {
-      const msg = `Failed to count players for event ${eventId}: ${playerCountError.message}`;
-      console.error('checkEventCompletion:', msg);
-      errors.push(msg);
+    // Gate 1: end_date must be set and 36h must have passed
+    if (!endDate) {
+      console.log(`checkEventCompletion: event ${pdgaEventId} has no end_date — skipping`);
       continue;
     }
 
-    // Supabase returns count on the response object when head:true
-    const { count: activePlayerCount } = await supabase
-      .from('event_players')
-      .select('*', { count: 'exact', head: true })
+    const completionThreshold = new Date(endDate).getTime() + COMPLETE_AFTER_HOURS * 60 * 60 * 1000;
+    if (Date.now() < completionThreshold) {
+      const hoursRemaining = ((completionThreshold - Date.now()) / 3_600_000).toFixed(1);
+      console.log(`checkEventCompletion: event ${pdgaEventId} — ${hoursRemaining}h until auto-complete window`);
+      continue;
+    }
+
+    // Gate 2: all rounds must have at least one score row
+    const { data: scoredRoundRows } = await supabase
+      .from('scores')
+      .select('round_number')
       .eq('event_id', eventId);
 
-    if (activePlayerCount === null) {
-      const msg = `Could not determine player count for event ${eventId}`;
+    const uniqueScoredRounds = new Set((scoredRoundRows ?? []).map((r) => r.round_number));
+    if (uniqueScoredRounds.size < numRounds) {
+      const msg = `event ${pdgaEventId} — only ${uniqueScoredRounds.size}/${numRounds} rounds have scores after 36h; manual review required`;
       console.warn('checkEventCompletion:', msg);
       errors.push(msg);
       continue;
     }
 
-    const expectedScoreRows = numRounds * activePlayerCount;
-
-    // Count distinct (event_player_id, round_number) score rows
-    const { data: scoreRows, error: scoresError } = await supabase
-      .from('scores')
-      .select('event_player_id, round_number')
-      .eq('event_id', eventId);
-
-    if (scoresError) {
-      const msg = `Failed to query scores for event ${eventId}: ${scoresError.message}`;
-      console.error('checkEventCompletion:', msg);
-      errors.push(msg);
-      continue;
-    }
-
-    // Deduplicate by (event_player_id, round_number)
-    const uniqueScores = new Set<string>(
-      (scoreRows as ScoreCountRow[]).map((r) => `${r.event_player_id}:${r.round_number}`)
-    );
-    const actualScoreCount = uniqueScores.size;
-
-    console.log(
-      `checkEventCompletion: event ${pdgaEventId} — ${actualScoreCount}/${expectedScoreRows} score rows` +
-        (scoresStale ? ' (scores_stale=true)' : '')
-    );
-
-    if (actualScoreCount < expectedScoreRows) {
-      continue; // Not yet complete
-    }
-
+    // Gate 3: scores must not be stale
     if (scoresStale) {
-      console.warn(
-        `checkEventCompletion: event ${pdgaEventId} appears complete but scores_stale=true — skipping completion call`
-      );
+      console.warn(`checkEventCompletion: event ${pdgaEventId} — scores_stale=true after 36h; skipping until fresh`);
       continue;
     }
 
-    // All rounds complete with verified data — trigger completion
-    console.log(`checkEventCompletion: event ${pdgaEventId} is complete — triggering completion endpoint`);
+    console.log(`checkEventCompletion: event ${pdgaEventId} — 36h elapsed, all rounds scored — triggering auto-complete`);
 
     try {
       await axios.post(
-        `${appUrl}/api/events/${eventId}/complete`,
-        {},
+        `${appUrl.replace(/\/$/, '')}/api/cron/complete-event`,
+        { event_id: eventId },
         { headers: { 'X-Service-Token': token }, timeout: 30_000 }
       );
-      console.log(`checkEventCompletion: completion triggered for event ${pdgaEventId}`);
+      console.log(`checkEventCompletion: auto-completed event ${pdgaEventId}`);
     } catch (err) {
-      const msg = `Completion endpoint failed for event ${pdgaEventId}: ${err instanceof Error ? err.message : err}`;
+      const msg = `Auto-complete failed for event ${pdgaEventId}: ${err instanceof Error ? err.message : err}`;
       console.error('checkEventCompletion:', msg);
       errors.push(msg);
     }
