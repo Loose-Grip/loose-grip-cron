@@ -9,7 +9,7 @@
 
 import axios from 'axios';
 import { supabase } from '../lib/supabase';
-import { fetchEventScores, fetchLatestTeeTime, scrapeAllRoundPars } from '../lib/scraper/pdgaScores';
+import { fetchEventScores, scrapeAllRoundPars } from '../lib/scraper/pdgaScores';
 import { logRun } from '../lib/logger';
 
 interface EventRow {
@@ -17,8 +17,6 @@ interface EventRow {
   pdga_event_id: string;
   num_rounds: number;
   current_round: number;
-  timezone: string;
-  next_round_starts_at: string | null;
 }
 
 interface EventPlayerRow {
@@ -42,7 +40,7 @@ async function main(): Promise<void> {
   // Fetch in-progress events
   const { data: events, error: eventsError } = await supabase
     .from('events')
-    .select('id, pdga_event_id, num_rounds, current_round, timezone, next_round_starts_at')
+    .select('id, pdga_event_id, num_rounds, current_round')
     .eq('status', 'in_progress');
 
   if (eventsError) {
@@ -63,42 +61,10 @@ async function main(): Promise<void> {
   const errors: string[] = [];
 
   for (const event of events as EventRow[]) {
-    const { id: eventId, pdga_event_id: pdgaEventId, num_rounds: numRounds, timezone } = event;
+    const { id: eventId, pdga_event_id: pdgaEventId, num_rounds: numRounds } = event;
     const maxRounds = numRounds ?? 4;
-    const eventTimezone = timezone ?? 'America/New_York';
 
     console.log(`syncScores: processing event ${pdgaEventId} (id=${eventId}) current_round=${event.current_round}`);
-
-    // Auto-advance: check if next round's last tee time has passed
-    if (event.current_round < maxRounds) {
-      const now = new Date();
-      let advanceRound = false;
-
-      if (event.next_round_starts_at) {
-        // Already have a stored tee time — just check if it's passed
-        advanceRound = now >= new Date(event.next_round_starts_at);
-        if (advanceRound) {
-          console.log(`syncScores: R${event.current_round + 1} tee time passed (${event.next_round_starts_at}) — auto-advancing`);
-        }
-      } else {
-        // Scrape tee times for next round and store the latest
-        const roundDate = new Date().toISOString().slice(0, 10);
-        const latestTeeTime = await fetchLatestTeeTime(pdgaEventId, event.current_round + 1, eventTimezone, roundDate);
-        if (latestTeeTime) {
-          await supabase.from('events').update({ next_round_starts_at: latestTeeTime.toISOString() }).eq('id', eventId);
-          console.log(`syncScores: stored R${event.current_round + 1} last tee time: ${latestTeeTime.toISOString()}`);
-          advanceRound = now >= latestTeeTime;
-        }
-      }
-
-      if (advanceRound) {
-        const newRound = event.current_round + 1;
-        await supabase.from('events').update({ current_round: newRound, next_round_starts_at: null }).eq('id', eventId);
-        console.log(`syncScores: advanced to R${newRound}`);
-        event.current_round = newRound;
-        event.next_round_starts_at = null;
-      }
-    }
 
     // Resolve pdga_number → event_player_id once per event (shared across all rounds)
     const { data: eventPlayers, error: epError } = await supabase
@@ -122,9 +88,14 @@ async function main(): Promise<void> {
 
     // Scrape all rounds from 1 to current_round so previous rounds are backfilled
     // if their data was ever lost. Upsert is idempotent — no duplicates created.
+    // Also attempt to scrape current_round+1 so we can detect when the next round
+    // has started and auto-advance without relying on tee time scraping.
     const currentRound = event.current_round;
+    const roundsToScrape = currentRound < maxRounds
+      ? currentRound + 1   // include next round for auto-advance detection
+      : currentRound;
 
-    for (let roundToScrape = 1; roundToScrape <= currentRound; roundToScrape++) {
+    for (let roundToScrape = 1; roundToScrape <= roundsToScrape; roundToScrape++) {
       let scores: Awaited<ReturnType<typeof fetchEventScores>>;
 
       try {
@@ -190,6 +161,26 @@ async function main(): Promise<void> {
       } catch (err) {
         // Non-fatal — scores are in DB, recalculation retries next run
         console.warn(`syncScores: recalculation callback failed for event ${pdgaEventId} R${roundToScrape} (non-fatal): ${err instanceof Error ? err.message : err}`);
+      }
+    }
+
+    // Auto-advance: if we just scraped R(currentRound+1) and it has ≥10 scores,
+    // the next round has clearly started — advance current_round.
+    // Threshold of 10 matches the round-completion detection pattern used elsewhere.
+    if (currentRound < maxRounds) {
+      const nextRound = currentRound + 1;
+      const { count } = await supabase
+        .from('scores')
+        .select('id', { count: 'exact', head: true })
+        .eq('event_id', eventId)
+        .eq('round_number', nextRound);
+      if ((count ?? 0) >= 10) {
+        await supabase
+          .from('events')
+          .update({ current_round: nextRound, next_round_starts_at: null })
+          .eq('id', eventId);
+        event.current_round = nextRound;
+        console.log(`syncScores: auto-advanced to R${nextRound} (${count} scores found)`);
       }
     }
 
