@@ -5,7 +5,7 @@
  * the public PDGA tour search page (no auth required) and upserts them into
  * the events table.
  *
- * Skips events that are already in_progress or complete.
+ * Skips events that are already in_progress, draft_open, or complete.
  * Runs once daily via GitHub Actions.
  */
 
@@ -169,7 +169,7 @@ async function main(): Promise<void> {
         .eq('pdga_event_id', event.pdgaEventId)
         .single();
 
-      if (existing && (existing.status === 'complete' || existing.status === 'in_progress')) {
+      if (existing && ['complete', 'in_progress', 'draft_open'].includes(existing.status)) {
         skippedCount++;
         continue;
       }
@@ -212,3 +212,4 @@ async function main(): Promise<void> {
 }
 
 main();
+
