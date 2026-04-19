@@ -150,11 +150,13 @@ async function main(): Promise<void> {
 
       console.log(`syncScores: upserted ${upsertRows.length} score rows for event ${pdgaEventId} R${roundToScrape}`);
 
-      // Trigger recalculation for this round
+      // Trigger recalculation for this round.
+      // is_verified=true when the round is fully complete (we've already advanced past it).
+      const isVerified = roundToScrape < currentRound;
       try {
         await axios.post(
           callbackUrl,
-          { event_id: eventId, round_number: roundToScrape },
+          { event_id: eventId, round_number: roundToScrape, is_verified: isVerified },
           { headers: { 'X-Service-Token': token }, timeout: 30_000 }
         );
         console.log(`syncScores: triggered recalculation for event ${pdgaEventId} R${roundToScrape}`);
