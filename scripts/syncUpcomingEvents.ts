@@ -11,6 +11,7 @@
 
 import * as cheerio from 'cheerio';
 import { fetchWithRetry } from '../lib/scraper/rateLimiter';
+import { scrapeAllRoundPars } from '../lib/scraper/pdgaScores';
 import { supabase } from '../lib/supabase';
 import { logRun } from '../lib/logger';
 
@@ -170,6 +171,41 @@ async function main(): Promise<void> {
         .single();
 
       if (existing && ['complete', 'in_progress', 'draft_open'].includes(existing.status)) {
+        // For active/in-progress events, sync safe metadata (dates, name, location, num_rounds).
+        // num_rounds is inferred from the number of round layout divs on the PDGA event page.
+        // We never touch status, draft config, or scores here.
+        if (existing.status === 'in_progress' || existing.status === 'draft_open') {
+          const roundPars = await scrapeAllRoundPars(event.pdgaEventId, 6); // 6 = generous upper bound
+          const inferredRounds = roundPars.size > 0 ? roundPars.size : null;
+
+          const { data: current } = await supabase
+            .from('events')
+            .select('name, location, start_date, end_date, num_rounds')
+            .eq('pdga_event_id', event.pdgaEventId)
+            .single();
+
+          const updates: Record<string, unknown> = {};
+          if (current?.name !== event.name) updates.name = event.name;
+          if (current?.location !== event.location) updates.location = event.location;
+          if (current?.start_date !== event.startDate) updates.start_date = event.startDate;
+          if (current?.end_date !== event.endDate) updates.end_date = event.endDate;
+          if (inferredRounds !== null && current?.num_rounds !== inferredRounds) updates.num_rounds = inferredRounds;
+
+          if (Object.keys(updates).length > 0) {
+            const { error: updateError } = await supabase
+              .from('events')
+              .update({ ...updates, updated_at: new Date().toISOString() })
+              .eq('pdga_event_id', event.pdgaEventId);
+            if (updateError) {
+              console.error(`syncUpcomingEvents: metadata update failed for active event ${event.pdgaEventId}:`, updateError.message);
+            } else {
+              console.log(`syncUpcomingEvents: updated active event ${event.pdgaEventId} — ${JSON.stringify(updates)}`);
+              updatedCount++;
+            }
+          } else {
+            console.log(`syncUpcomingEvents: active event ${event.pdgaEventId} metadata unchanged`);
+          }
+        }
         skippedCount++;
         continue;
       }

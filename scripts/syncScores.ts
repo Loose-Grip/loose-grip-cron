@@ -151,8 +151,17 @@ async function main(): Promise<void> {
       console.log(`syncScores: upserted ${upsertRows.length} score rows for event ${pdgaEventId} R${roundToScrape}`);
 
       // Trigger recalculation for this round.
-      // is_verified=true when the round is fully complete (we've already advanced past it).
-      const isVerified = roundToScrape < currentRound;
+      // is_verified=true when:
+      //   (a) we've already advanced past this round (currentRound > roundToScrape), OR
+      //   (b) this IS the final round and enough scores are present (round can't advance further).
+      //
+      // For the final round, "enough" = at least as many scores as there are event_players,
+      // with a minimum floor of 10 (matches the auto-advance detection threshold).
+      // We use the upsertRows count from this scrape as a proxy — if we just wrote a full
+      // complement of scores for the last round, it's complete.
+      const isFinalRound = roundToScrape === maxRounds;
+      const finalRoundComplete = isFinalRound && upsertRows.length >= Math.max(10, playerMap.size);
+      const isVerified = roundToScrape < currentRound || finalRoundComplete;
       try {
         await axios.post(
           callbackUrl,
