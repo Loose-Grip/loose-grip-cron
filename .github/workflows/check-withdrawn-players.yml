@@ -1,0 +1,30 @@
+name: Check Withdrawn Players
+
+on:
+  schedule:
+    # Once daily at 22:00 UTC (= 08:00 AEDT)
+    - cron: '0 22 * * *'
+  workflow_dispatch:
+
+jobs:
+  check-withdrawn-players:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run checkWithdrawnPlayers
+        run: npx tsx scripts/checkWithdrawnPlayers.ts
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          CRON_SERVICE_TOKEN: ${{ secrets.CRON_SERVICE_TOKEN }}
+          NEXT_PUBLIC_APP_URL: ${{ secrets.NEXT_PUBLIC_APP_URL }}
