@@ -7,22 +7,17 @@
  * The endpoint finds events where status = 'upcoming' AND draft_opens_at <= now
  * AND draft_order is set, seeds draft_picks, and transitions them to draft_open.
  *
- * Exits early if the current time is outside 09:00–21:00 Melbourne.
+ * NOTE: No time-window guard here. The route itself handles both rolling and live modes.
+ * Rolling drafts only open during 09:00–21:00 Melbourne (enforced inside the route).
+ * Live drafts must open on their exact scheduled time regardless of hour.
  * Runs every 15 minutes via GitHub Actions.
  */
 
 import axios from 'axios';
-import { isInActiveWindow } from '../lib/draft/pickTimer';
 import { logRun } from '../lib/logger';
 
 async function main(): Promise<void> {
   const startMs = Date.now();
-
-  if (!isInActiveWindow(new Date())) {
-    console.log('openDraft: outside active window (09:00–21:00 Melbourne) — skipping');
-    await logRun({ job: 'open_draft', status: 'skipped', message: 'Outside active window', duration_ms: Date.now() - startMs });
-    process.exit(0);
-  }
 
   const appUrl = process.env.NEXT_PUBLIC_APP_URL;
   const token = process.env.CRON_SERVICE_TOKEN;
