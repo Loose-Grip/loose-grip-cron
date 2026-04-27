@@ -14,6 +14,7 @@ import { logRun } from '../lib/logger';
 
 interface EventRow {
   id: string;
+  name: string | null;
   pdga_event_id: string;
   num_rounds: number;
   current_round: number;
@@ -40,7 +41,7 @@ async function main(): Promise<void> {
   // Fetch in-progress events
   const { data: events, error: eventsError } = await supabase
     .from('events')
-    .select('id, pdga_event_id, num_rounds, current_round')
+    .select('id, name, pdga_event_id, num_rounds, current_round')
     .eq('status', 'in_progress');
 
   if (eventsError) {
@@ -61,7 +62,7 @@ async function main(): Promise<void> {
   const errors: string[] = [];
 
   for (const event of events as EventRow[]) {
-    const { id: eventId, pdga_event_id: pdgaEventId, num_rounds: numRounds } = event;
+    const { id: eventId, name: eventName, pdga_event_id: pdgaEventId, num_rounds: numRounds } = event;
     const maxRounds = numRounds ?? 4;
 
     console.log(`syncScores: processing event ${pdgaEventId} (id=${eventId}) current_round=${event.current_round}`);
@@ -149,13 +150,38 @@ async function main(): Promise<void> {
         .eq('source', 'manual')
         .in('event_player_id', manualPlayerIds);
 
-      for (const existing of existingManual ?? []) {
-        const incoming = upsertRows.find((r) => r.event_player_id === existing.event_player_id);
-        if (incoming && incoming.strokes !== existing.strokes) {
-          console.warn(
-            `syncScores: MANUAL SCORE OVERWRITE — event ${pdgaEventId} R${roundToScrape} ` +
-            `player ${existing.event_player_id}: manual=${existing.strokes}, scraper=${incoming.strokes}`
-          );
+      if (existingManual && existingManual.length > 0) {
+        // Fetch player names for readable alert messages
+        const { data: playerNames } = await supabase
+          .from('event_players')
+          .select('id, name')
+          .in('id', existingManual.map((e) => e.event_player_id));
+        const playerNameMap = Object.fromEntries((playerNames ?? []).map((p) => [p.id, p.name]));
+
+        for (const existing of existingManual) {
+          const incoming = upsertRows.find((r) => r.event_player_id === existing.event_player_id);
+          if (incoming && incoming.strokes !== existing.strokes) {
+            const playerName = playerNameMap[existing.event_player_id] ?? existing.event_player_id;
+            console.warn(
+              `syncScores: MANUAL SCORE OVERWRITE — event ${pdgaEventId} R${roundToScrape} ` +
+              `${playerName}: manual=${existing.strokes}, scraper=${incoming.strokes}`
+            );
+            // Fire admin push alert (fire-and-forget)
+            axios.post(
+              `${appUrl.replace(/\/$/, '')}/api/cron/admin-alert`,
+              {
+                type: 'score_overwrite',
+                event_name: eventName ?? pdgaEventId,
+                round_number: roundToScrape,
+                player_name: playerName,
+                manual_score: existing.strokes,
+                scraper_score: incoming.strokes,
+              },
+              { headers: { 'X-Service-Token': token }, timeout: 10_000 }
+            ).catch((err: unknown) => {
+              console.warn(`syncScores: admin-alert call failed (non-fatal): ${err instanceof Error ? err.message : err}`);
+            });
+          }
         }
       }
 
