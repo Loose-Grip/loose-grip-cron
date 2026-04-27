@@ -25,6 +25,21 @@ interface EventPlayerRow {
   pdga_number: string;
 }
 
+/** Fire-and-forget admin push alert via the app's admin-alert endpoint. */
+function fireAdminAlert(
+  appUrl: string,
+  token: string,
+  payload: Record<string, unknown>
+): void {
+  axios.post(
+    `${appUrl.replace(/\/$/, '')}/api/cron/admin-alert`,
+    payload,
+    { headers: { 'X-Service-Token': token }, timeout: 10_000 }
+  ).catch((err: unknown) => {
+    console.warn(`syncScores: admin-alert call failed (non-fatal): ${err instanceof Error ? err.message : err}`);
+  });
+}
+
 async function main(): Promise<void> {
   const startMs = Date.now();
 
@@ -112,6 +127,15 @@ async function main(): Promise<void> {
 
       if (scores.length === 0) {
         console.warn(`syncScores: no scores for event ${pdgaEventId} R${roundToScrape} — skipping round`);
+        // Only alert for rounds that should have data (current round or earlier, not a speculative next-round scrape)
+        if (roundToScrape <= currentRound) {
+          fireAdminAlert(appUrl, token, {
+            type: 'scrape_failure',
+            event_name: eventName ?? pdgaEventId,
+            round_number: roundToScrape,
+            reason: `Zero scores returned from PDGA for R${roundToScrape}. Page may be unavailable or selectors need updating.`,
+          });
+        }
         continue;
       }
 
@@ -132,6 +156,20 @@ async function main(): Promise<void> {
           };
         })
         .filter((r): r is NonNullable<typeof r> => r !== null);
+
+      const unmatchedCount = scores.length - upsertRows.length;
+      if (unmatchedCount > 0) {
+        console.warn(`syncScores: ${unmatchedCount} PDGA number(s) unmatched in event_players for event ${pdgaEventId} R${roundToScrape}`);
+        // Alert if more than 3 players are unmatched — likely a player pool sync issue
+        if (unmatchedCount > 3) {
+          fireAdminAlert(appUrl, token, {
+            type: 'scrape_failure',
+            event_name: eventName ?? pdgaEventId,
+            round_number: roundToScrape,
+            reason: `${unmatchedCount} scraped players not found in event pool. Player pool may need re-syncing.`,
+          });
+        }
+      }
 
       if (upsertRows.length === 0) {
         console.warn(`syncScores: no resolvable players for event ${pdgaEventId} R${roundToScrape} — skipping`);
@@ -167,19 +205,13 @@ async function main(): Promise<void> {
               `${playerName}: manual=${existing.strokes}, scraper=${incoming.strokes}`
             );
             // Fire admin push alert (fire-and-forget)
-            axios.post(
-              `${appUrl.replace(/\/$/, '')}/api/cron/admin-alert`,
-              {
-                type: 'score_overwrite',
-                event_name: eventName ?? pdgaEventId,
-                round_number: roundToScrape,
-                player_name: playerName,
-                manual_score: existing.strokes,
-                scraper_score: incoming.strokes,
-              },
-              { headers: { 'X-Service-Token': token }, timeout: 10_000 }
-            ).catch((err: unknown) => {
-              console.warn(`syncScores: admin-alert call failed (non-fatal): ${err instanceof Error ? err.message : err}`);
+            fireAdminAlert(appUrl, token, {
+              type: 'score_overwrite',
+              event_name: eventName ?? pdgaEventId,
+              round_number: roundToScrape,
+              player_name: playerName,
+              manual_score: existing.strokes,
+              scraper_score: incoming.strokes,
             });
           }
         }
@@ -234,12 +266,25 @@ async function main(): Promise<void> {
         .eq('event_id', eventId)
         .eq('round_number', nextRound);
       if ((count ?? 0) >= 10) {
-        await supabase
+        const { error: advanceError } = await supabase
           .from('events')
           .update({ current_round: nextRound, next_round_starts_at: null })
           .eq('id', eventId);
-        event.current_round = nextRound;
-        console.log(`syncScores: auto-advanced to R${nextRound} (${count} scores found)`);
+        if (advanceError) {
+          console.error(`syncScores: failed to auto-advance event ${pdgaEventId} to R${nextRound}: ${advanceError.message}`);
+          fireAdminAlert(appUrl, token, {
+            type: 'scrape_failure',
+            event_name: eventName ?? pdgaEventId,
+            round_number: nextRound,
+            reason: `R${nextRound} has ${count} scores but auto-advance to R${nextRound} failed: ${advanceError.message}`,
+          });
+        } else {
+          event.current_round = nextRound;
+          console.log(`syncScores: auto-advanced to R${nextRound} (${count} scores found)`);
+        }
+      } else if ((count ?? 0) > 0 && (count ?? 0) < 10) {
+        // Scores exist for next round but below threshold — could be early trickle or stuck advance
+        console.warn(`syncScores: R${nextRound} has ${count} score(s) for event ${pdgaEventId} — below auto-advance threshold of 10, not advancing yet`);
       }
     }
 
