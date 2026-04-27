@@ -137,6 +137,28 @@ async function main(): Promise<void> {
         continue;
       }
 
+      // Cross-check: warn if scraper is about to overwrite a manual score with a different value.
+      // This surfaces discrepancies (e.g. storm-suspension par awards vs official posted scores)
+      // without blocking the upsert — official scraper scores always take precedence.
+      const manualPlayerIds = upsertRows.map((r) => r.event_player_id);
+      const { data: existingManual } = await supabase
+        .from('scores')
+        .select('event_player_id, strokes')
+        .eq('event_id', eventId)
+        .eq('round_number', roundToScrape)
+        .eq('source', 'manual')
+        .in('event_player_id', manualPlayerIds);
+
+      for (const existing of existingManual ?? []) {
+        const incoming = upsertRows.find((r) => r.event_player_id === existing.event_player_id);
+        if (incoming && incoming.strokes !== existing.strokes) {
+          console.warn(
+            `syncScores: MANUAL SCORE OVERWRITE — event ${pdgaEventId} R${roundToScrape} ` +
+            `player ${existing.event_player_id}: manual=${existing.strokes}, scraper=${incoming.strokes}`
+          );
+        }
+      }
+
       const { error: upsertError } = await supabase
         .from('scores')
         .upsert(upsertRows, { onConflict: 'event_id,event_player_id,round_number' });
