@@ -127,15 +127,15 @@ async function main(): Promise<void> {
 
       if (scores.length === 0) {
         console.warn(`syncScores: no scores for event ${pdgaEventId} R${roundToScrape} — skipping round`);
-        // Only alert for rounds that should have data (current round or earlier, not a speculative next-round scrape)
-        if (roundToScrape <= currentRound) {
-          fireAdminAlert(appUrl, token, {
-            type: 'scrape_failure',
-            event_name: eventName ?? pdgaEventId,
-            round_number: roundToScrape,
-            reason: `Zero scores returned from PDGA for R${roundToScrape}. Page may be unavailable or selectors need updating.`,
-          });
-        }
+        // Admin alert disabled — scraper fires before scores are available and causes false alarms
+        // if (roundToScrape <= currentRound) {
+        //   fireAdminAlert(appUrl, token, {
+        //     type: 'scrape_failure',
+        //     event_name: eventName ?? pdgaEventId,
+        //     round_number: roundToScrape,
+        //     reason: `Zero scores returned from PDGA for R${roundToScrape}. Page may be unavailable or selectors need updating.`,
+        //   });
+        // }
         continue;
       }
 
@@ -160,15 +160,15 @@ async function main(): Promise<void> {
       const unmatchedCount = scores.length - upsertRows.length;
       if (unmatchedCount > 0) {
         console.warn(`syncScores: ${unmatchedCount} PDGA number(s) unmatched in event_players for event ${pdgaEventId} R${roundToScrape}`);
-        // Alert if more than 3 players are unmatched — likely a player pool sync issue
-        if (unmatchedCount > 3) {
-          fireAdminAlert(appUrl, token, {
-            type: 'scrape_failure',
-            event_name: eventName ?? pdgaEventId,
-            round_number: roundToScrape,
-            reason: `${unmatchedCount} scraped players not found in event pool. Player pool may need re-syncing.`,
-          });
-        }
+        // Admin alert disabled — scraper fires before scores are available and causes false alarms
+        // if (unmatchedCount > 3) {
+        //   fireAdminAlert(appUrl, token, {
+        //     type: 'scrape_failure',
+        //     event_name: eventName ?? pdgaEventId,
+        //     round_number: roundToScrape,
+        //     reason: `${unmatchedCount} scraped players not found in event pool. Player pool may need re-syncing.`,
+        //   });
+        // }
       }
 
       if (upsertRows.length === 0) {
