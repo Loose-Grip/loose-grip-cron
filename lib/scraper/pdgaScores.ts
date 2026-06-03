@@ -254,7 +254,76 @@ export async function scrapeAllRoundPars(
 }
 
 // ---------------------------------------------------------------------------
-// Public API — tries Layer 2 then falls back to Layer 3
+// Layer 2 — PDGA live scores page (/tour/event/{id}/live)
+//
+// Table structure (verified against https://www.pdga.com/tour/event/98193/live):
+//
+//   #tournament-stats-0 (MPO table)
+//   Header: <th class="round tooltip">Rd1</th> <th class="round tooltip">Rd2</th> ...
+//   Player row:
+//     <td class="pdga-number">75412</td>
+//     <td class="round"><a href="...?round=1" class="score">55</a></td>  ← absolute strokes
+//
+// Round columns are identified by header text (Rd1, Rd2 …) mapped to PDGA round href param.
+// ---------------------------------------------------------------------------
+
+async function scrapeLivePageScores(
+  pdgaEventId: string,
+  roundNumber: number,
+  numRounds?: number
+): Promise<ScrapedScore[]> {
+  const url = `https://www.pdga.com/tour/event/${encodeURIComponent(pdgaEventId)}/live`;
+  let html: string;
+  try {
+    html = await fetchWithRetry(url);
+  } catch (err) {
+    console.warn(`Layer 2: failed to fetch live page for event ${pdgaEventId}: ${err instanceof Error ? err.message : err}`);
+    return [];
+  }
+
+  const $ = cheerio.load(html);
+  const $table = $('#tournament-stats-0');
+
+  if ($table.length === 0) {
+    console.warn(`Layer 2: #tournament-stats-0 not found for event ${pdgaEventId} — event may not be live yet`);
+    return [];
+  }
+
+  const isFinalRound = numRounds !== undefined && roundNumber === numRounds;
+  const acceptedPdgaRounds = new Set([roundNumber, ...(isFinalRound ? [12] : [])]);
+
+  const results: ScrapedScore[] = [];
+
+  $table.find('tbody tr').each((_, row) => {
+    const $row = $(row);
+    const pdgaNumber = $row.find('td.pdga-number').text().trim();
+    if (!pdgaNumber) return;
+
+    $row.find('td.round a.score').each((_, link) => {
+      const href = $(link).attr('href') ?? '';
+      const roundMatch = href.match(/[?&]round=(\d+)/);
+      if (!roundMatch) return;
+      if (!acceptedPdgaRounds.has(parseInt(roundMatch[1], 10))) return;
+
+      const text = $(link).text().trim();
+      if (!/^\d+$/.test(text)) return;
+      const strokes = parseInt(text, 10);
+
+      results.push({ pdgaNumber, roundNumber, strokes });
+    });
+  });
+
+  if (results.length === 0) {
+    console.warn(`Layer 2: no scores found for event ${pdgaEventId} R${roundNumber} on live page`);
+  } else {
+    console.log(`Layer 2: scraped ${results.length} scores for event ${pdgaEventId} R${roundNumber} from live page`);
+  }
+
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// Public API
 // ---------------------------------------------------------------------------
 
 export async function fetchEventScores(
@@ -262,7 +331,19 @@ export async function fetchEventScores(
   roundNumber: number,
   numRounds?: number
 ): Promise<ScrapedScore[]> {
-  // Layer 2 (live scores page) returns par-relative totals, not absolute stroke counts.
-  // Layer 3 (main event page) returns absolute stroke counts — the only reliable source.
   return scrapeHtmlScores(pdgaEventId, roundNumber, numRounds);
+}
+
+/**
+ * Layer 2 fallback — scrapes the PDGA live scoring page directly.
+ * Used when the primary scrape returns zero scores and either:
+ *   - scores_stale flag is set on the event, OR
+ *   - consecutive zero-score runs have exceeded the threshold
+ */
+export async function fetchEventScoresFromLivePage(
+  pdgaEventId: string,
+  roundNumber: number,
+  numRounds?: number
+): Promise<ScrapedScore[]> {
+  return scrapeLivePageScores(pdgaEventId, roundNumber, numRounds);
 }

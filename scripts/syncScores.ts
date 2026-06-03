@@ -9,8 +9,13 @@
 
 import axios from 'axios';
 import { supabase } from '../lib/supabase';
-import { fetchEventScores, scrapeAllRoundPars } from '../lib/scraper/pdgaScores';
+import { fetchEventScores, fetchEventScoresFromLivePage, scrapeAllRoundPars } from '../lib/scraper/pdgaScores';
 import { logRun } from '../lib/logger';
+
+// Consecutive zero-score run counter per event — resets on any successful scrape.
+// Persists across rounds within a single run; resets between cron invocations.
+const zeroScoreRuns = new Map<string, number>();
+const ZERO_SCORE_FALLBACK_THRESHOLD = 3;
 
 interface EventRow {
   id: string;
@@ -18,6 +23,7 @@ interface EventRow {
   pdga_event_id: string;
   num_rounds: number;
   current_round: number;
+  scores_stale: boolean;
 }
 
 interface EventPlayerRow {
@@ -56,7 +62,7 @@ async function main(): Promise<void> {
   // Fetch in-progress events
   const { data: events, error: eventsError } = await supabase
     .from('events')
-    .select('id, name, pdga_event_id, num_rounds, current_round')
+    .select('id, name, pdga_event_id, num_rounds, current_round, scores_stale')
     .eq('status', 'in_progress');
 
   if (eventsError) {
@@ -125,18 +131,42 @@ async function main(): Promise<void> {
 
       console.log(`syncScores: scraping R${roundToScrape} for event ${pdgaEventId} (${scores.length} scores)`);
 
+      let scoreSource: string = 'scraper';
+
       if (scores.length === 0) {
-        console.warn(`syncScores: no scores for event ${pdgaEventId} R${roundToScrape} — skipping round`);
-        // Admin alert disabled — scraper fires before scores are available and causes false alarms
-        // if (roundToScrape <= currentRound) {
-        //   fireAdminAlert(appUrl, token, {
-        //     type: 'scrape_failure',
-        //     event_name: eventName ?? pdgaEventId,
-        //     round_number: roundToScrape,
-        //     reason: `Zero scores returned from PDGA for R${roundToScrape}. Page may be unavailable or selectors need updating.`,
-        //   });
-        // }
-        continue;
+        // Increment consecutive zero-score counter for this event
+        const misses = (zeroScoreRuns.get(eventId) ?? 0) + 1;
+        zeroScoreRuns.set(eventId, misses);
+
+        const shouldFallback = event.scores_stale || misses >= ZERO_SCORE_FALLBACK_THRESHOLD;
+
+        if (shouldFallback && roundToScrape <= currentRound) {
+          const reason = event.scores_stale
+            ? 'scores_stale flag set'
+            : `${misses} consecutive zero-score runs`;
+          console.warn(`syncScores: primary scrape returned 0 scores for event ${pdgaEventId} R${roundToScrape} (${reason}) — trying live page fallback`);
+
+          try {
+            scores = await fetchEventScoresFromLivePage(pdgaEventId, roundToScrape, maxRounds);
+          } catch (err) {
+            console.warn(`syncScores: live page fallback failed for event ${pdgaEventId} R${roundToScrape}: ${err instanceof Error ? err.message : err}`);
+          }
+
+          if (scores.length === 0) {
+            console.warn(`syncScores: live page also returned 0 scores for event ${pdgaEventId} R${roundToScrape} — skipping round`);
+            continue;
+          }
+
+          console.log(`syncScores: live page fallback succeeded for event ${pdgaEventId} R${roundToScrape} (${scores.length} scores)`);
+          zeroScoreRuns.set(eventId, 0);
+          scoreSource = 'pdga_html';
+        } else {
+          console.warn(`syncScores: no scores for event ${pdgaEventId} R${roundToScrape} — skipping round`);
+          continue;
+        }
+      } else {
+        // Successful primary scrape — reset consecutive miss counter
+        zeroScoreRuns.set(eventId, 0);
       }
 
       // Build upsert rows
@@ -152,7 +182,7 @@ async function main(): Promise<void> {
             event_player_id: eventPlayerId,
             round_number: s.roundNumber,
             strokes: s.strokes,
-            source: 'scraper',
+            source: scoreSource,
           };
         })
         .filter((r): r is NonNullable<typeof r> => r !== null);
