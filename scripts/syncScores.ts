@@ -10,6 +10,7 @@
 import axios from 'axios';
 import { supabase } from '../lib/supabase';
 import { fetchEventScores, fetchEventScoresFromLivePage, scrapeAllRoundPars } from '../lib/scraper/pdgaScores';
+import { runScoreAudit } from '../lib/scoreAudit';
 import { logRun } from '../lib/logger';
 
 // Consecutive zero-score run counter per event — resets on any successful scrape.
@@ -282,6 +283,18 @@ async function main(): Promise<void> {
       } catch (err) {
         // Non-fatal — scores are in DB, recalculation retries next run
         console.warn(`syncScores: recalculation callback failed for event ${pdgaEventId} R${roundToScrape} (non-fatal): ${err instanceof Error ? err.message : err}`);
+      }
+
+      // Run integrity checks on verified rounds only
+      if (isVerified) {
+        await runScoreAudit({
+          appUrl,
+          token,
+          eventId,
+          eventName: eventName ?? pdgaEventId,
+          pdgaEventId,
+          roundNumber: roundToScrape,
+        });
       }
     }
 
