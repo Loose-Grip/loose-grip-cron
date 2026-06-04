@@ -16,7 +16,7 @@ import { logRun } from '../lib/logger';
 // Consecutive zero-score run counter per event — resets on any successful scrape.
 // Persists across rounds within a single run; resets between cron invocations.
 const zeroScoreRuns = new Map<string, number>();
-const ZERO_SCORE_FALLBACK_THRESHOLD = 3;
+const ZERO_SCORE_FALLBACK_THRESHOLD = 1;
 
 interface EventRow {
   id: string;
@@ -144,7 +144,7 @@ async function main(): Promise<void> {
         if (shouldFallback && roundToScrape <= currentRound) {
           const reason = event.scores_stale
             ? 'scores_stale flag set'
-            : `${misses} consecutive zero-score runs`;
+            : 'primary scrape returned 0 scores';
           console.warn(`syncScores: primary scrape returned 0 scores for event ${pdgaEventId} R${roundToScrape} (${reason}) — trying live page fallback`);
 
           try {
