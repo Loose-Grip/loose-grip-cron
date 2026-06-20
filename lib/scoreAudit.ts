@@ -80,11 +80,11 @@ export async function runScoreAudit(ctx: AuditContext): Promise<void> {
 
   // Fetch user display names for readable alerts
   const userIds = [...new Set(activePicks.map((p) => p.user_id).filter((id): id is string => !!id))];
-  const { data: profileRows } = await supabase
-    .from('profiles')
-    .select('id, display_name')
+  const { data: userRows } = await supabase
+    .from('users')
+    .select('id, name')
     .in('id', userIds);
-  const userName = Object.fromEntries((profileRows ?? []).map((p) => [p.id, p.display_name ?? p.id]));
+  const userName = Object.fromEntries((userRows ?? []).map((p) => [p.id, p.name ?? p.id]));
 
   // Fetch all score rows for this event + round
   const { data: scoreRows, error: scoresError } = await supabase
@@ -109,17 +109,18 @@ export async function runScoreAudit(ctx: AuditContext): Promise<void> {
   }
 
   // ── Check 1: Missing scores ─────────────────────────────────────────────
+  // Batch-fetch player statuses to avoid N+1 queries
+  const { data: playerStatusRows } = await supabase
+    .from('event_players')
+    .select('id, status')
+    .in('id', playerIds);
+  const playerStatus = Object.fromEntries((playerStatusRows ?? []).map((p) => [p.id, p.status]));
+
   const missing: string[] = [];
   for (const pick of activePicks) {
     if (!pick.event_player_id) continue;
+    if (playerStatus[pick.event_player_id] !== 'active') continue;
     const rows = scoresByPlayer.get(pick.event_player_id) ?? [];
-    // Only flag if player is not marked withdrawn (withdrawn players won't have scores)
-    const { data: epRow } = await supabase
-      .from('event_players')
-      .select('status')
-      .eq('id', pick.event_player_id)
-      .single();
-    if (epRow?.status !== 'active') continue;
     if (rows.length === 0) {
       missing.push(
         `${userName[pick.user_id ?? ''] ?? pick.user_id} → ${playerName[pick.event_player_id]} (slot ${pick.pick_slot}) has no score for R${roundNumber}`
