@@ -274,14 +274,26 @@ async function main(): Promise<void> {
       const finalRoundComplete = isFinalRound && upsertRows.length >= Math.max(10, playerMap.size);
       const isVerified = roundToScrape < currentRound || finalRoundComplete;
       try {
-        await axios.post(
+        const callbackRes = await axios.post(
           callbackUrl,
           { event_id: eventId, round_number: roundToScrape, is_verified: isVerified },
-          { headers: { 'X-Service-Token': token }, timeout: 30_000 }
+          { headers: { 'X-Service-Token': token }, timeout: 30_000, validateStatus: () => true }
         );
-        console.log(`syncScores: triggered recalculation for event ${pdgaEventId} R${roundToScrape}`);
+        if (callbackRes.status === 401) {
+          const msg = `sync-scores callback returned 401 UNAUTHORIZED for event ${pdgaEventId} R${roundToScrape}. Service token may be out of sync between GitHub Actions and Vercel.`;
+          console.error('syncScores:', msg);
+          fireAdminAlert(appUrl, token, {
+            type: 'scrape_failure',
+            event_name: eventName ?? pdgaEventId,
+            round_number: roundToScrape,
+            reason: msg,
+          });
+          errors.push(msg);
+        } else {
+          console.log(`syncScores: triggered recalculation for event ${pdgaEventId} R${roundToScrape} (HTTP ${callbackRes.status})`);
+        }
       } catch (err) {
-        // Non-fatal — scores are in DB, recalculation retries next run
+        // Network-level failure — scores are in DB, recalculation retries next run
         console.warn(`syncScores: recalculation callback failed for event ${pdgaEventId} R${roundToScrape} (non-fatal): ${err instanceof Error ? err.message : err}`);
       }
 

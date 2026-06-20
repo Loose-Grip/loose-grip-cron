@@ -33,8 +33,18 @@ async function main(): Promise<void> {
       {
         headers: { 'X-Service-Token': token },
         timeout: 30_000,
+        validateStatus: () => true,
       }
     );
+
+    if (response.status === 401) {
+      // 401 means the service token is out of sync between GitHub Actions and Vercel.
+      // Exit 1 so GitHub Actions marks the job as failed and sends a failure email.
+      const msg = `HTTP 401 UNAUTHORIZED — service token mismatch between GitHub Actions and Vercel. Re-sync CRON_SERVICE_TOKEN in both places.`;
+      console.error('checkPickTimers:', msg);
+      await logRun({ job: 'check_timers', status: 'error', message: msg, duration_ms: Date.now() - startMs });
+      process.exit(1);
+    }
 
     const msg = `HTTP ${response.status}`;
     console.log('checkPickTimers: success —', msg);
