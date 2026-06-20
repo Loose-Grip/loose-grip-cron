@@ -5,6 +5,8 @@
  *   - draft_opens_at is within the next 24 hours (1-day pre-draft check), or
  *   - start_date is today UTC (morning-of check)
  *
+ * AND for all in_progress events (always checked — no time-window filter).
+ *
  * 1. Scrape current registered MPO players from PDGA
  * 2. Call POST /api/cron/check-withdrawn-players with { event_id, registered_pdga_numbers: [...] }
  */
@@ -18,6 +20,7 @@ interface EventRow {
   id: string;
   pdga_event_id: string;
   name: string;
+  status: string;
   draft_opens_at: string | null;
   start_date: string | null;
 }
@@ -37,8 +40,8 @@ async function main(): Promise<void> {
 
   const { data: events, error: eventsError } = await supabase
     .from('events')
-    .select('id, pdga_event_id, name, draft_opens_at, start_date')
-    .in('status', ['upcoming', 'draft_open']);
+    .select('id, pdga_event_id, name, status, draft_opens_at, start_date')
+    .in('status', ['upcoming', 'draft_open', 'in_progress']);
 
   if (eventsError) {
     const msg = `Failed to query events: ${eventsError.message}`;
@@ -48,7 +51,7 @@ async function main(): Promise<void> {
   }
 
   if (!events || events.length === 0) {
-    console.log('checkWithdrawnPlayers: no upcoming/draft_open events — skipping');
+    console.log('checkWithdrawnPlayers: no upcoming/draft_open/in_progress events — skipping');
     await logRun({ job: 'check_withdrawn', status: 'skipped', message: 'No eligible events', duration_ms: Date.now() - startMs });
     process.exit(0);
   }
@@ -58,6 +61,8 @@ async function main(): Promise<void> {
   const in24h = new Date(now.getTime() + 24 * 60 * 60 * 1000);
 
   const eligible = (events as EventRow[]).filter((ev) => {
+    // in_progress events are always checked — no time-window filter
+    if (ev.status === 'in_progress') return true;
     // Trigger 1: draft opens within the next 24 hours
     if (ev.draft_opens_at) {
       const draftOpens = new Date(ev.draft_opens_at);
@@ -105,9 +110,15 @@ async function main(): Promise<void> {
       const response = await axios.post(
         callbackUrl,
         { event_id: eventId, registered_pdga_numbers: registeredPdgaNumbers },
-        { headers: { 'X-Service-Token': token }, timeout: 30_000 }
+        { headers: { 'X-Service-Token': token }, timeout: 30_000, validateStatus: () => true }
       );
-      console.log(`checkWithdrawnPlayers: event ${pdgaEventId} → HTTP ${response.status}`);
+      if (response.status === 401) {
+        const msg = `check-withdrawn-players returned 401 UNAUTHORIZED for event ${pdgaEventId}. Service token may be out of sync.`;
+        console.error('checkWithdrawnPlayers:', msg);
+        errors.push(msg);
+      } else {
+        console.log(`checkWithdrawnPlayers: event ${pdgaEventId} → HTTP ${response.status}`);
+      }
     } catch (err) {
       const msg = `API call failed for event ${pdgaEventId}: ${err instanceof Error ? err.message : err}`;
       console.error('checkWithdrawnPlayers:', msg);

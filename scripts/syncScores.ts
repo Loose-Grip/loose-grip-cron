@@ -10,6 +10,7 @@
 import axios from 'axios';
 import { supabase } from '../lib/supabase';
 import { fetchEventScores, fetchEventScoresFromLivePage, scrapeAllRoundPars } from '../lib/scraper/pdgaScores';
+import { scrapeEventPlayers } from '../lib/scraper/pdgaEventPlayers';
 import { runScoreAudit } from '../lib/scoreAudit';
 import { logRun } from '../lib/logger';
 
@@ -341,6 +342,38 @@ async function main(): Promise<void> {
         // Scores exist for next round but below threshold — could be early trickle or stuck advance
         console.warn(`syncScores: R${nextRound} has ${count} score(s) for event ${pdgaEventId} — below auto-advance threshold of 10, not advancing yet`);
       }
+    }
+
+    // Check for mid-tournament withdrawals — scrape full registered field and call
+    // check-withdrawn-players once per event per cron run. This runs independently
+    // of the isFirstScoreSync / isRoundNowVerified triggers in sync-scores so that
+    // any cron outage doesn't leave DNS players permanently undetected.
+    try {
+      const registeredPlayers = await scrapeEventPlayers(pdgaEventId);
+      if (registeredPlayers.length > 0) {
+        const checkWithdrawnUrl = `${appUrl.replace(/\/$/, '')}/api/cron/check-withdrawn-players`;
+        const withdrawnRes = await axios.post(
+          checkWithdrawnUrl,
+          { event_id: eventId, registered_pdga_numbers: registeredPlayers.map((p) => p.pdgaNumber) },
+          { headers: { 'X-Service-Token': token }, timeout: 30_000, validateStatus: () => true }
+        );
+        if (withdrawnRes.status === 401) {
+          const msg = `check-withdrawn-players returned 401 UNAUTHORIZED for event ${pdgaEventId}. Service token may be out of sync between GitHub Actions and Vercel.`;
+          console.error('syncScores:', msg);
+          fireAdminAlert(appUrl, token, {
+            type: 'scrape_failure',
+            event_name: eventName ?? pdgaEventId,
+            reason: msg,
+          });
+          errors.push(msg);
+        } else {
+          console.log(`syncScores: withdrawal check for event ${pdgaEventId} → HTTP ${withdrawnRes.status}`);
+        }
+      } else {
+        console.warn(`syncScores: scrapeEventPlayers returned 0 players for event ${pdgaEventId} — skipping withdrawal check`);
+      }
+    } catch (err) {
+      console.warn(`syncScores: withdrawal check failed for event ${pdgaEventId} (non-fatal): ${err instanceof Error ? err.message : err}`);
     }
 
     // Scrape and upsert course_par into event_rounds for all completed rounds
